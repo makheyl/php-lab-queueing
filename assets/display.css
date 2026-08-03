@@ -1,0 +1,344 @@
+/* =========================================================
+   OPD Queueing — kiosk / public display
+   Fullscreen board, same palette as the admin theme.
+   ========================================================= */
+
+:root {
+    --green: #32e37c;
+    --green-dark: #22c369;
+    --teal: #1de9b6;
+    --orange: #ff9800;
+    --red: #f44336;
+    --pink: #ff1744;
+    --blue: #2196f3;
+    --blue-dark: #1976d2;
+    --yellow: #bfa600;
+
+    --bg: #f4f6fb;
+    --surface: #ffffff;
+    --surface-alt: #f8fafc;
+    --border: #e3e8f0;
+    --text: #232e3d;
+    --text-muted: #67748b;
+    --text-faint: #9aa5b8;
+
+    --radius-md: 14px;
+    --radius-lg: 20px;
+    --shadow-sm: 0 2px 10px rgba(23, 32, 46, 0.06);
+    --shadow-md: 0 6px 22px rgba(23, 32, 46, 0.09);
+
+    --font: 'Segoe UI', -apple-system, BlinkMacSystemFont, 'Inter', Roboto, Helvetica, Arial, sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+    height: 100vh;
+    margin: 0;
+    padding: 0;
+    overflow: hidden;
+    font-family: var(--font);
+    background: var(--bg);
+    color: var(--text);
+}
+
+.kiosk-header {
+    width: 100%;
+    background: var(--green);
+    padding: 16px 0;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    box-sizing: border-box;
+    box-shadow: 0 2px 12px rgba(34, 195, 105, 0.25);
+}
+.kiosk-header .logo {
+    margin-left: 36px;
+    width: 48px;
+    height: 48px;
+    background: #fff;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    flex-shrink: 0;
+}
+.kiosk-header .logo img { width: 100%; height: 100%; object-fit: contain; }
+.kiosk-header .title {
+    color: #fff;
+    font-size: 1.7rem;
+    font-weight: 700;
+    letter-spacing: 0.3px;
+}
+
+.kiosk-body {
+    width: 100vw;
+    min-width: 320px;
+    margin: 0 auto;
+    background: var(--surface);
+    padding: 1vw 1vw 1.6vw;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    box-sizing: border-box;
+}
+
+.kiosk-stats {
+    display: flex;
+    gap: 28px;
+    justify-content: center;
+    margin-bottom: 14px;
+}
+.kiosk-stat {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow-sm);
+    padding: 10px 34px;
+    min-width: 170px;
+    text-align: center;
+    border-top: 3px solid var(--green);
+}
+.kiosk-stat .label {
+    display: block;
+    color: var(--text-muted);
+    font-size: 1.05rem;
+    font-weight: 700;
+    margin-bottom: 6px;
+}
+.kiosk-stat .value {
+    font-size: 2.2rem;
+    font-weight: 800;
+    color: var(--green-dark);
+}
+
+.kiosk-columns {
+    display: flex;
+    flex-direction: row;
+    gap: 0.6vw;
+    justify-content: stretch;
+    align-items: flex-start;
+    width: 100%;
+    margin-top: 0.4vw;
+    flex-wrap: nowrap;
+    overflow: hidden;
+}
+
+.kiosk-col {
+    flex: 1 1 0;
+    min-width: 0;
+    max-width: 100%;
+    background: var(--surface-alt);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    padding: 0.5vw 0 0.2vw;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    margin: 0 0.3vw;
+    max-height: 80vh;
+    overflow: hidden;
+}
+.kiosk-col h2 {
+    text-align: center;
+    font-size: clamp(1rem, 1.4vw, 1.5rem);
+    font-weight: 700;
+    margin: 4px 0 6px;
+}
+.kiosk-col.waiting-col { flex: 1 1 0; min-width: 240px; max-width: 22vw; color: var(--green-dark); }
+.kiosk-col.waiting-col h2 { color: var(--green-dark); }
+.kiosk-col.serving-col { flex: 2.5 1 0; min-width: 460px; max-width: 60vw; }
+.kiosk-col.serving-col h2 { color: var(--green-dark); }
+.kiosk-col.pending-col h2 { color: var(--orange); }
+
+.kiosk-cards {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5vw;
+    justify-content: center;
+    width: 100%;
+}
+
+.kiosk-card {
+    width: clamp(120px, 16vw, 240px);
+    height: clamp(90px, 13vw, 170px);
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+    border-radius: 1.4vw;
+    background: var(--surface);
+    border: 2px solid var(--green);
+    box-shadow: var(--shadow-sm);
+    text-align: center;
+    padding: 0.3vw 0.6vw;
+    overflow: hidden;
+}
+.kiosk-card .queue-number {
+    font-size: clamp(2.4rem, 7vw, 8vw);
+    font-weight: 800;
+    color: var(--green-dark);
+    line-height: 1.05;
+    margin: 0;
+    white-space: nowrap;
+    max-width: 100%;
+}
+.kiosk-card .badge {
+    font-size: clamp(0.65rem, 1.1vw, 1.05rem);
+    font-weight: 700;
+    padding: 0.25vw 0.9vw;
+    border-radius: 999px;
+    color: #fff;
+    letter-spacing: 0.4px;
+}
+.kiosk-card .badge.badge-priority,
+.kiosk-card .badge.badge-infectious { background: var(--red); }
+.kiosk-card .badge.badge-completed { background: var(--blue); }
+.kiosk-card .badge.badge-pending { background: var(--orange); }
+
+.kiosk-card .info {
+    margin-top: 0.35vw;
+    font-size: clamp(0.6rem, 0.9vw, 1rem);
+    font-weight: 600;
+    color: var(--green-dark);
+}
+.kiosk-card .table-label { font-weight: 600; letter-spacing: 0.4px; margin-right: 0.2vw; }
+.kiosk-card .table-num { font-weight: 700; }
+
+.kiosk-card.priority,
+.kiosk-card.infectious {
+    background: #fdeceb;
+    border-color: var(--red);
+}
+.kiosk-card.priority .queue-number,
+.kiosk-card.infectious .queue-number { color: var(--red); }
+.kiosk-card.priority .info,
+.kiosk-card.infectious .info { color: var(--red); }
+
+.kiosk-card.completed {
+    background: #e8f3fd;
+    border-color: var(--blue);
+}
+.kiosk-card.completed .queue-number { color: var(--blue-dark); }
+.kiosk-card.completed .info { color: var(--blue-dark); }
+
+.kiosk-card.pending {
+    background: #fdf7dc;
+    border-color: var(--yellow);
+}
+.kiosk-card.pending .queue-number { color: var(--yellow); }
+.kiosk-card.pending .info { color: var(--yellow); }
+
+/* Waiting column: compact cards */
+.waiting-col .kiosk-cards {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 0.3vw;
+    width: 100%;
+    justify-items: center;
+}
+.waiting-col .kiosk-card {
+    width: clamp(64px, 7.6vw, 100px);
+    height: clamp(126px, 19vw, 185px);
+    padding: 0.15vw 0.2vw 0.2vw;
+}
+.waiting-col .kiosk-card .queue-number { font-size: clamp(1.1rem, 3vw, 2.4rem); white-space: nowrap; }
+
+/* Pending column: compact cards */
+.pending-col .kiosk-cards {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 0.5vw;
+    width: 100%;
+    justify-items: center;
+}
+.pending-col .kiosk-card {
+    width: clamp(60px, 7vw, 90px);
+    height: clamp(80px, 12vw, 140px);
+    padding: 0.1vw 0.15vw 0.2vw;
+}
+.pending-col .kiosk-card .queue-number { font-size: clamp(1rem, 2.6vw, 2.1rem); white-space: nowrap; }
+.pending-col .kiosk-card .info { font-size: clamp(0.55rem, 0.8vw, 0.85rem); }
+
+/* Serving column: table groups */
+.serving-cards {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 0.8vw;
+    width: 100%;
+    justify-items: center;
+}
+.kiosk-col.serving-col { --card-w: clamp(130px, 16vw, 190px); }
+.table-column {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.6vw;
+    min-height: 200px;
+    width: 100%;
+}
+.table-header {
+    background: var(--surface);
+    color: var(--orange);
+    border: 2px solid var(--orange);
+    padding: 0.7vw 0.4vw;
+    border-radius: 1vw;
+    font-size: clamp(1.1rem, 1.8vw, 2rem);
+    font-weight: 800;
+    text-align: center;
+    box-shadow: var(--shadow-sm);
+    width: var(--card-w);
+}
+.serving-card {
+    width: var(--card-w) !important;
+    height: clamp(120px, 18vw, 200px) !important;
+}
+.serving-card .queue-number { font-size: clamp(1.8rem, 4.2vw, 3.6rem) !important; white-space: nowrap; }
+
+.kiosk-empty {
+    text-align: center;
+    width: 100%;
+    color: var(--text-faint);
+    font-size: clamp(0.9rem, 1.2vw, 1.1rem);
+    padding: 12px 0;
+}
+
+/* ---------- Responsive ---------- */
+@media (max-width: 1200px) {
+    .kiosk-columns { gap: 0.4vw; }
+    .kiosk-col.serving-col { flex: 2 1 0; min-width: 380px; }
+    .serving-cards { grid-template-columns: repeat(2, 1fr); gap: 1vw; }
+    .table-header { font-size: clamp(1rem, 1.8vw, 1.6rem); padding: 0.8vw 1.2vw; }
+}
+
+@media (max-width: 768px) {
+    html, body { overflow: auto; }
+    .kiosk-header { padding: 12px 0; gap: 12px; }
+    .kiosk-header .logo { margin-left: 18px; width: 38px; height: 38px; }
+    .kiosk-header .title { font-size: 1.3rem; }
+    .kiosk-body { padding: 10px; }
+    .kiosk-stats { gap: 16px; margin-bottom: 12px; }
+    .kiosk-stat { padding: 8px 20px; min-width: 130px; }
+    .kiosk-stat .value { font-size: 1.7rem; }
+    .kiosk-columns { flex-direction: column; gap: 12px; margin-top: 10px; }
+    .kiosk-col { flex: none; min-width: 100%; max-width: 100%; margin: 0; max-height: none; overflow: visible; }
+    .kiosk-col.serving-col { min-width: 100%; max-width: 100%; --card-w: clamp(100px, 20vw, 150px); }
+    .serving-cards { grid-template-columns: repeat(2, 1fr); gap: 12px; }
+    .serving-card { height: clamp(90px, 18vw, 140px) !important; }
+    .serving-card .queue-number { font-size: clamp(1.4rem, 4vw, 2.6rem) !important; white-space: nowrap; }
+    .waiting-col .kiosk-cards, .pending-col .kiosk-cards { grid-template-columns: repeat(4, 1fr); gap: 8px; }
+    .waiting-col .kiosk-card { width: clamp(50px, 8vw, 70px); height: clamp(80px, 12vw, 120px); }
+    .pending-col .kiosk-card { width: clamp(50px, 8vw, 70px); height: clamp(60px, 10vw, 100px); }
+}
+
+@media (max-width: 480px) {
+    .kiosk-stats { flex-wrap: wrap; gap: 10px; }
+    .kiosk-stat { flex: 1 1 calc(33.333% - 8px); padding: 6px 10px; min-width: 90px; }
+    .kiosk-stat .label { font-size: 0.8rem; }
+    .kiosk-stat .value { font-size: 1.4rem; }
+    .serving-cards { grid-template-columns: 1fr; }
+    .waiting-col .kiosk-cards, .pending-col .kiosk-cards { grid-template-columns: repeat(3, 1fr); }
+}
