@@ -9,10 +9,13 @@ require 'config.php';
 echo "Testing database setup...\n\n";
 
 // Test 1: Check if tables exist
-$tables = ['doctor_appointments_log', 'daily_statistics', 'historical_data'];
+$tables = ['queue', 'lab_activity_log', 'daily_statistics', 'historical_data', 'settings'];
 $all_tables_exist = true;
 
 foreach ($tables as $table) {
+    // SHOW TABLES LIKE doesn't support placeholders in MariaDB's prepared-statement
+    // protocol — $table only ever comes from the hardcoded $tables array above,
+    // never external input, so interpolating it here is safe.
     $result = $conn->query("SHOW TABLES LIKE '$table'");
     if ($result && $result->num_rows > 0) {
         echo "✓ Table '$table' exists\n";
@@ -32,33 +35,51 @@ echo "\n✓ All tables exist!\n\n";
 // Test 2: Check table structure
 echo "Testing table structure...\n";
 
-// Test doctor_appointments_log
-$result = $conn->query("DESCRIBE doctor_appointments_log");
-if ($result) {
-    echo "✓ doctor_appointments_log table structure is correct\n";
-} else {
-    echo "✗ Error checking doctor_appointments_log structure: " . $conn->error . "\n";
+foreach ($tables as $table) {
+    // Table/column identifiers can't be bind parameters — $table only ever
+    // comes from the hardcoded $tables array above, never external input.
+    $result = $conn->query("DESCRIBE `$table`");
+    if ($result) {
+        echo "✓ $table table structure is correct\n";
+    } else {
+        echo "✗ Error checking $table structure: " . $conn->error . "\n";
+    }
 }
 
-// Test daily_statistics
-$result = $conn->query("DESCRIBE daily_statistics");
+// Test 3: Check settings are seeded
+echo "\nTesting settings seed data...\n";
+$expected_settings = [
+    'queue_prefix' => 'L',
+    'daily_reset_hour' => '4',
+    'flash_duration_seconds' => '10',
+    'recall_limit' => '3',
+    'announcement' => '',
+    'queue_retention_days' => '30',
+];
+
+$result = $conn->query("SELECT `key`, `value` FROM settings");
+$actual_settings = [];
 if ($result) {
-    echo "✓ daily_statistics table structure is correct\n";
-} else {
-    echo "✗ Error checking daily_statistics structure: " . $conn->error . "\n";
+    while ($row = $result->fetch_assoc()) {
+        $actual_settings[$row['key']] = $row['value'];
+    }
 }
 
-// Test historical_data
-$result = $conn->query("DESCRIBE historical_data");
-if ($result) {
-    echo "✓ historical_data table structure is correct\n";
-} else {
-    echo "✗ Error checking historical_data structure: " . $conn->error . "\n";
+$all_settings_ok = true;
+foreach ($expected_settings as $key => $expected_value) {
+    if (array_key_exists($key, $actual_settings) && $actual_settings[$key] === $expected_value) {
+        echo "✓ Setting '$key' = '$expected_value'\n";
+    } else {
+        $actual = array_key_exists($key, $actual_settings) ? $actual_settings[$key] : '(missing)';
+        echo "✗ Setting '$key' expected '$expected_value', got '$actual'\n";
+        $all_settings_ok = false;
+    }
+}
+
+if (!$all_settings_ok) {
+    echo "\n❌ Settings seed data is incomplete or incorrect.\n";
+    exit(1);
 }
 
 echo "\n✓ Database setup is complete and working!\n";
-echo "\nYou can now:\n";
-echo "1. Use the doctor panel (doctor.php)\n";
-echo "2. View admin reports (admin.php)\n";
-echo "3. Schedule the daily reset (daily_reset.php)\n";
-?> 
+?>

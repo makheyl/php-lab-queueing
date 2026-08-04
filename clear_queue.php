@@ -1,45 +1,88 @@
 <?php
 /*
- * This script deletes all rows from the 'queue' table.
+ * Deletes ALL rows from the `queue` table — every service_date, every
+ * status, no filter. This is NOT the same as daily_reset.php, which only
+ * archives/closes out the day that just ended and purges old rows by
+ * settings.queue_retention_days; this script wipes everything, immediately.
  *
- * To schedule this script to run every day at midnight Philippine time (UTC+8):
+ * Meant to be run from Task Scheduler / cron for a full manual reset, not
+ * hit by URL — but it lives in the web root like every other file here, so
+ * a browser visit requires typing a confirmation phrase first. CLI runs
+ * (Task Scheduler/cron) are NOT prompted, so scheduling this still works
+ * unattended.
  *
- * 1. Find your PHP executable path (for XAMPP, usually):
- *    C:\xampp\php\php.exe
+ * Windows Task Scheduler:
+ *   Program:   C:\xampp\php\php.exe
+ *   Arguments: C:\xampp\htdocs\PHPLabQueueing\clear_queue.php
+ *   Start in:  C:\xampp\htdocs\PHPLabQueueing
  *
- * 2. Find your script path:
- *    C:\xampp\htdocs\PHPQueueing\clear_queue.php
- *
- * 3. Open Windows Task Scheduler:
- *    - Press Win+S, type "Task Scheduler", and open it.
- *    - Click "Create Basic Task..."
- *    - Name: Clear Clinic Queue Daily
- *    - Description: Deletes all queue data at midnight Philippine time.
- *
- * 4. Set the Trigger:
- *    - Choose "Daily"
- *    - Start: Set the date and time to the next midnight in Philippine time (UTC+8).
- *      (If your PC is set to Philippine time, use 12:00:00 AM. If not, convert midnight PH time to your local time.)
- *
- * 5. Set the Action:
- *    - Choose "Start a program"
- *    - Program/script:
- *        C:\xampp\php\php.exe
- *    - Add arguments:
- *        C:\xampp\htdocs\PHPQueueing\clear_queue.php
- *
- * 6. Finish:
- *    - Review and finish the wizard.
- *
- * 7. (Optional) Test the Task:
- *    - Right-click your new task in Task Scheduler and choose "Run" to make sure it works.
- *    - Check your database to confirm the 'queue' table is empty.
- *
- * For Linux (cron job), add this to your crontab (adjust path and time zone as needed):
- *    0 0 * * * /usr/bin/php /path/to/PHPQueueing/clear_queue.php
- *
- * If you need help, ask your system administrator or refer to the documentation for Task Scheduler or cron.
+ * Linux cron:
+ *   0 0 * * * /usr/bin/php /path/to/PHPLabQueueing/clear_queue.php
  */
+
 require 'config.php';
-$conn->query("DELETE FROM queue");
-?> 
+
+const CONFIRM_PHRASE = 'DELETE ALL';
+
+function do_clear($conn) {
+    $count_before = $conn->query('SELECT COUNT(*) AS cnt FROM queue')->fetch_assoc()['cnt'];
+    $conn->query('DELETE FROM queue');
+    $stmt = $conn->prepare("INSERT INTO lab_activity_log (staff_name, station, queue_number, action) VALUES (?, 0, 0, 'clear_queue_full_wipe')");
+    $source = PHP_SAPI === 'cli' ? 'cli' : ($_SERVER['REMOTE_ADDR'] ?? 'unknown');
+    $staff = "system ($source)";
+    $stmt->bind_param('s', $staff);
+    $stmt->execute();
+    $stmt->close();
+    return (int) $count_before;
+}
+
+if (PHP_SAPI === 'cli') {
+    $deleted = do_clear($conn);
+    echo "Cleared $deleted row(s) from queue.\n";
+    exit();
+}
+
+// --- HTTP access: require typing the confirmation phrase first ---
+
+if (isset($_POST['confirm_phrase'])) {
+    if ($_POST['confirm_phrase'] === CONFIRM_PHRASE) {
+        $deleted = do_clear($conn);
+        echo '<!doctype html><html><body style="font-family:Segoe UI,sans-serif;text-align:center;padding:60px 20px;">'
+           . '<h2>Cleared.</h2><p>' . $deleted . ' row(s) deleted from the queue table.</p></body></html>';
+        exit();
+    }
+    $error = 'Phrase did not match — nothing was deleted.';
+}
+
+$row_count = $conn->query('SELECT COUNT(*) AS cnt FROM queue')->fetch_assoc()['cnt'];
+?>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Clear Queue — Laboratory Queueing</title>
+<link rel="stylesheet" href="assets/theme.css">
+</head>
+<body>
+    <div class="app-header">
+        <img src="CHO.png" alt="CHO Logo" class="logo-img">
+        <div class="title">Laboratory Queueing</div>
+        <div class="subtitle">Clear Queue</div>
+    </div>
+    <div class="page" style="max-width:480px;">
+        <div class="alert alert-error">
+            This deletes ALL <?= (int) $row_count ?> row(s) currently in the <code>queue</code> table —
+            every service date, every status. This is not the daily reset; there is no undo.
+        </div>
+        <?php if (!empty($error)): ?>
+        <div class="alert alert-error"><?= htmlspecialchars($error) ?></div>
+        <?php endif; ?>
+        <form method="post" class="toolbar-form" style="flex-direction:column; align-items:stretch;">
+            <label for="confirm_phrase">Type <strong><?= htmlspecialchars(CONFIRM_PHRASE) ?></strong> to confirm</label>
+            <input class="field" type="text" id="confirm_phrase" name="confirm_phrase" autocomplete="off" autofocus required>
+            <button type="submit" class="btn btn-danger">Delete Everything</button>
+        </form>
+    </div>
+</body>
+</html>

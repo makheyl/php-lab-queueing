@@ -454,9 +454,9 @@ select.field { cursor: pointer; }
     border-radius: var(--radius-lg);
     box-shadow: var(--shadow-lg);
     padding: 28px 24px 24px;
-    max-width: 1300px;
+    max-width: 280px;
     width: 100%;
-    max-height: 88vh;
+    max-height: 40vh;
     overflow: auto;
     position: relative;
 }
@@ -480,6 +480,40 @@ select.field { cursor: pointer; }
     min-width: 0;
 }
 .modal-close:hover { background: var(--red); color: #fff; }
+
+/* ---------- Confirm modal (e.g. No Show) — small themed variant of .modal-box,
+   used in place of the native confirm() dialog so it can carry app styling.
+   Fixed width + aspect-ratio (not just max-width) so it renders as an actual
+   square floater regardless of .modal-box's own width:100%/max-width rules. */
+.confirm-box {
+    width: 280px;
+    max-width: 40vw;
+    max-height: none;
+    aspect-ratio: 1 / 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    padding: 18px;
+}
+.confirm-box h3 {
+    margin: 0 0 8px;
+    color: var(--orange-dark);
+    font-size: 1.25rem;
+}
+.confirm-box p {
+    margin: 0 0 16px;
+    color: var(--text-muted);
+    font-size: 0.95rem;
+}
+.confirm-actions {
+    display: flex;
+    justify-content: center;
+    gap: 8px;
+    width: 100%;
+}
+.confirm-actions .btn { min-width: 0; flex: 1 1 0; }
 
 /* ---------- Responsive ---------- */
 @media (max-width: 900px) {

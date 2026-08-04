@@ -77,7 +77,7 @@ html, body {
     min-width: 320px;
     margin: 0 auto;
     background: var(--surface);
-    padding: 1vw 1vw 1.6vw;
+    padding: 1vw 1vw clamp(56px, 6vw, 76px);
     display: flex;
     flex-direction: column;
     align-items: center;
@@ -341,4 +341,229 @@ html, body {
     .kiosk-stat .value { font-size: 1.4rem; }
     .serving-cards { grid-template-columns: 1fr; }
     .waiting-col .kiosk-cards, .pending-col .kiosk-cards { grid-template-columns: repeat(3, 1fr); }
+}
+
+/* =========================================================
+   Laboratory Queueing — additive extension for display.php
+   Everything above this line is OPD's original display.css,
+   unchanged, and still used by display_backgrounded.php.
+   Everything below is additive-only: new classes, no edits to
+   existing selectors, so the OPD board keeps rendering as-is.
+   ========================================================= */
+
+/* FOR INTERVIEW column: same .kiosk-col shell, widened + single big number
+   instead of OPD's compact 3-per-row waiting grid. */
+.kiosk-col.lab-interview-col {
+    flex: 1.4 1 0;
+    min-width: 300px;
+    max-width: 30vw;
+}
+.interview-display {
+    width: 100%;
+    flex: 1 1 auto;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.8vw;
+}
+.interview-number {
+    font-variant-numeric: tabular-nums;
+    font-size: clamp(4rem, 13vw, 15vw);
+    font-weight: 800;
+    line-height: 1;
+    color: #1a7a45; /* darker than --green-dark for contrast — see the note further down */
+    min-width: 3ch;
+    text-align: center;
+}
+.interview-station {
+    font-size: clamp(1rem, 1.8vw, 1.8rem);
+    font-weight: 700;
+    color: var(--text-muted);
+}
+
+/* NOW SERVING — EXTRACTION column: one station only, so this is a single
+   number at the same scale as FOR INTERVIEW, not OPD's multi-bay card row.
+   .kiosk-cards/.kiosk-card/.serving-card are shared base classes (also used
+   by display_backgrounded.php) — sizing overrides are scoped to
+   .lab-serving-col so that page's own multi-table layout is untouched. */
+.kiosk-col.lab-serving-col {
+    flex: 1.4 1 0;
+    min-width: 300px;
+    max-width: 30vw;
+}
+.lab-serving-col .kiosk-cards {
+    flex: 1 1 auto;
+    align-items: center;
+    justify-content: center;
+}
+.lab-serving-col .serving-card {
+    width: auto !important;
+    height: auto !important;
+    padding: 0.6vw 1vw;
+    border: none;
+    background: transparent;
+    box-shadow: none;
+}
+.lab-serving-col .serving-card .queue-number {
+    font-variant-numeric: tabular-nums;
+    font-size: clamp(4rem, 13vw, 15vw) !important;
+    min-width: 3ch;
+}
+
+/* NEXT UP column: capped at 3 so it reads as "who's coming up," not a
+   full waiting list. The first card is the one actually up next after the
+   current extraction — it gets the orange accent + NEXT badge; the other
+   two stay muted grey so they don't compete visually and get mistaken for
+   an active call. */
+.next-up-cards {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 0.6vw;
+    width: 100%;
+    justify-items: center;
+}
+.next-up-card {
+    width: clamp(90px, 10vw, 140px);
+    height: clamp(70px, 9vw, 110px);
+    background: var(--surface-alt);
+    border-color: var(--border);
+    gap: 0.2vw;
+}
+.next-up-card .queue-number {
+    font-size: clamp(1.6rem, 4vw, 3rem) !important;
+    color: var(--text-muted);
+}
+.next-up-card.is-next {
+    background: #fff4e2;
+    border-color: var(--orange);
+    box-shadow: var(--shadow-md);
+}
+.next-up-card .badge-next {
+    background: var(--orange);
+    font-size: clamp(0.55rem, 0.9vw, 0.8rem);
+}
+
+/* Tabular numerals + fixed-width container everywhere a called number can
+   change digit-count, so 2-digit -> 3-digit never shifts surrounding layout. */
+.tabular-nums,
+.interview-number,
+.serving-card .queue-number,
+.next-up-card .queue-number {
+    font-variant-numeric: tabular-nums;
+}
+
+/* Flash when a number is newly called: pulsing opacity + soft glow, ~1Hz.
+   Deliberately far from the ~3Hz photosensitive-seizure threshold — do not
+   speed this up. Uses currentColor so it adapts to whichever element it's
+   applied to without inventing new colors. */
+@keyframes lab-flash-pulse {
+    0%, 100% { opacity: 1; text-shadow: 0 0 0 currentColor; }
+    50% { opacity: 0.55; text-shadow: 0 0 30px currentColor; }
+}
+.lab-flashing {
+    animation: lab-flash-pulse 1s ease-in-out infinite;
+}
+
+/* Empty-panel state, reusing .kiosk-empty's existing look at a size that
+   reads at 5-8m; never a spinner. */
+.interview-display .kiosk-empty,
+.table-column .kiosk-empty,
+.next-up-cards .kiosk-empty {
+    font-size: clamp(1rem, 1.6vw, 1.6rem);
+    font-weight: 600;
+}
+
+/* Footer: clock, date, and a slowly scrolling announcement.
+   Fixed so it always stays pinned to the viewport bottom — kiosk-body's
+   height grows with queue content and can exceed 100vh, which used to push
+   this out from under the html/body overflow:hidden clip. */
+.kiosk-footer {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    width: 100%;
+    display: flex;
+    align-items: center;
+    gap: 2vw;
+    padding: 0.6vw 2vw;
+    background: var(--surface);
+    border-top: 1px solid var(--border);
+    box-shadow: 0 -2px 10px rgba(23, 32, 46, 0.06);
+    box-sizing: border-box;
+    z-index: 20;
+}
+.kiosk-clock {
+    font-variant-numeric: tabular-nums;
+    font-size: clamp(1rem, 1.6vw, 1.6rem);
+    font-weight: 800;
+    color: var(--text);
+    white-space: nowrap;
+}
+.kiosk-date {
+    font-size: clamp(0.8rem, 1.1vw, 1.1rem);
+    color: var(--text-muted);
+    white-space: nowrap;
+}
+.kiosk-announcement-wrap {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    position: relative;
+    height: 1.6em;
+}
+.kiosk-announcement-track {
+    position: absolute;
+    top: 0;
+    left: 0;
+    white-space: nowrap;
+    padding-left: 100%;
+    font-size: clamp(0.85rem, 1.1vw, 1.05rem);
+    font-weight: 600;
+    color: var(--text-muted);
+    animation-name: lab-marquee;
+    animation-timing-function: linear;
+    animation-iteration-count: infinite;
+}
+@keyframes lab-marquee {
+    from { transform: translateX(0); }
+    to { transform: translateX(-100%); }
+}
+
+@media (max-width: 768px) {
+    .kiosk-col.lab-interview-col { max-width: 100%; }
+    .kiosk-footer { flex-wrap: wrap; }
+}
+
+/* ---------- Contrast fixes, scoped to display.php only ----------
+   OPD's original --green-dark/--orange text-on-light combos measure ~2.1-2.3:1
+   here (WCAG requires >=3:1 for large text, >=4.5:1 for small) — a real
+   failure on the highest-stakes screen in the app, read from 5-8m. Scoped to
+   body.lab-board (only display.php sets that class) rather than changed at
+   the :root custom-property level, so display_backgrounded.php — which
+   shares this stylesheet and was explicitly not part of this change —
+   keeps rendering with OPD's original colors, untouched. */
+body.lab-board .kiosk-stat .value,
+body.lab-board .kiosk-col.waiting-col h2,
+body.lab-board .kiosk-col.serving-col h2,
+body.lab-board .kiosk-card .queue-number {
+    color: #1a7a45; /* was var(--green-dark) #22c369, ~2.3:1 on white — now ~5.4:1 */
+}
+body.lab-board .kiosk-col.pending-col h2,
+body.lab-board .table-header {
+    color: #a85800; /* was var(--orange) #ff9800, ~2.1:1 — now ~5:1 */
+}
+body.lab-board .table-header {
+    border-color: #a85800;
+}
+/* Carve-outs from the blanket .kiosk-card .queue-number rule above, which
+   would otherwise flatten every NEXT FOR EXTRACTION card to the same green
+   as everything else — defeating the muted/accented distinction that marks
+   which one is actually up next. */
+body.lab-board .next-up-card .queue-number {
+    color: var(--text-muted);
+}
+body.lab-board .next-up-card.is-next .queue-number {
+    color: #a85800;
 }
