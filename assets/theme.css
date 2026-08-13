@@ -321,6 +321,11 @@ select.field { cursor: pointer; }
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
 }
+.queue-grid.grid-cols-2 {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    justify-items: center;
+}
 
 .queue-card {
     position: relative;
@@ -349,6 +354,12 @@ select.field { cursor: pointer; }
     font-size: 0.78rem;
     font-weight: 600;
     color: var(--text-muted);
+    word-break: break-word;
+}
+.queue-card .claim-name {
+    font-size: 1.05rem;
+    font-weight: 700;
+    color: var(--text);
     word-break: break-word;
 }
 .queue-card .card-actions {

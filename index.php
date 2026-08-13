@@ -154,6 +154,36 @@ if (!empty($_SERVER['HTTP_X_REQUESTED_WITH']) && isset($_POST['payment_confirm']
     exit();
 }
 
+// Ready for Claiming panel: same inline-AJAX pattern as the two handlers
+// above, chosen specifically so adding/claiming a name never reloads the
+// page — a full-page-reload here would reset scroll position, which is the
+// actual problem this was built to avoid.
+if (!empty($_SERVER['HTTP_X_REQUESTED_WITH']) && isset($_POST['add_claimable'])) {
+    header('Content-Type: application/json');
+    $post_encoder = trim($_POST['encoder_name'] ?? '');
+    $surname = trim($_POST['surname'] ?? '');
+    $first_name_initials = trim($_POST['first_name_initials'] ?? '');
+    if ($surname === '' || $first_name_initials === '') {
+        echo json_encode(['ok' => false, 'error' => 'Surname and first name initials are required.']);
+        exit();
+    }
+    $id = add_claimable_result($conn, $surname, $first_name_initials, $post_encoder);
+    echo json_encode([
+        'ok' => true,
+        'row' => ['id' => $id, 'surname' => $surname, 'first_name_initials' => $first_name_initials],
+    ]);
+    exit();
+}
+
+if (!empty($_SERVER['HTTP_X_REQUESTED_WITH']) && isset($_POST['mark_claimed'])) {
+    header('Content-Type: application/json');
+    $id = (int) ($_POST['id'] ?? 0);
+    $post_encoder = trim($_POST['encoder_name'] ?? '');
+    $ok = mark_result_claimed($conn, $id, $post_encoder);
+    echo json_encode(['ok' => $ok]);
+    exit();
+}
+
 // ---------- POST handlers (POST-Redirect-GET per CLAUDE.md §4) ----------
 
 $error_message = '';
@@ -184,7 +214,7 @@ if (isset($_POST['call_next'])) {
             'queue_number' => $ticket['queue_number'],
             'type' => 'interview',
             'station' => $post_station,
-            'timestamp' => time(),
+            'timestamp' => microtime(true),
         ]));
     } else {
         // Nothing waiting (or another station's request won the claim race) — flash a
@@ -228,7 +258,7 @@ if (isset($_POST['recall'])) {
             'queue_number' => $ticket['queue_number'],
             'type' => 'interview',
             'station' => $post_station,
-            'timestamp' => time(),
+            'timestamp' => microtime(true),
         ]));
     }
     header('Location: ' . redirect_url($post_encoder, $post_station));
@@ -287,17 +317,7 @@ if ($has_identity) {
     $current_ticket = $stmt->get_result()->fetch_assoc() ?: null;
     $stmt->close();
 
-    // So the encoder can see what was decided (FOR PAYMENT vs NO CHARGE) after
-    // the fact, not just at the moment of deciding — same idea as extraction.php's
-    // "Recently Completed" strip.
-    $stmt = $conn->prepare(
-        "SELECT * FROM queue WHERE service_date = ? AND interview_station = ? AND interview_completed_at IS NOT NULL
-         ORDER BY interview_completed_at DESC LIMIT 5"
-    );
-    $stmt->bind_param('si', $service_date, $interview_station);
-    $stmt->execute();
-    $recently_interviewed = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
-    $stmt->close();
+    $claimable_results = get_claimable_results($conn);
 }
 
 $WAITING_VISIBLE_LIMIT = 4;
@@ -337,6 +357,10 @@ $WAITING_VISIBLE_LIMIT = 4;
     .waiting-col .queue-grid .extra-card { display: none; }
     .waiting-col .queue-grid.show-all .extra-card { display: flex; }
     #waitingSeeMoreBtn { margin-top: 12px; }
+    /* Wider/taller than the default .modal-box (280px/40vh) so the existing
+       2-column name grid and search bar have room, instead of squeezing a
+       grid built for that layout into a narrow single-column-ish box. */
+    .modal-box.claim-list-box { max-width: 640px; max-height: 78vh; }
 </style>
 <script>
     // --- Auto-refresh on DB update ---
@@ -545,44 +569,67 @@ $WAITING_VISIBLE_LIMIT = 4;
             </div>
         </div>
 
-        <div class="queue-section" style="margin-top:22px;">
-            <h2 class="section-title accent-orange">Payment Confirmation</h2>
-            <form id="paymentSearchForm" class="toolbar-form">
-                <label for="paymentSearchInput">Queue Number</label>
-                <input class="field" type="number" id="paymentSearchInput" name="queue_number" style="font-size:1.3rem;font-weight:700;width:150px;text-align:center;" autofocus autocomplete="off" min="1">
-                <button type="submit" class="btn">Find</button>
-            </form>
-            <div id="paymentResultBox" style="width:100%;display:flex;justify-content:center;margin:6px 0 22px;"></div>
+        <div class="main-columns" style="margin-top:22px;">
+            <div class="queue-section">
+                <h2 class="section-title accent-orange">Payment Confirmation</h2>
+                <form id="paymentSearchForm" class="toolbar-form">
+                    <label for="paymentSearchInput">Queue Number</label>
+                    <input class="field" type="number" id="paymentSearchInput" name="queue_number" style="font-size:1.3rem;font-weight:700;width:150px;text-align:center;" autofocus autocomplete="off" min="1">
+                    <button type="submit" class="btn">Find</button>
+                </form>
+                <div id="paymentResultBox" style="width:100%;display:flex;justify-content:center;margin:6px 0 22px;"></div>
 
-            <div class="queue-grid">
-                <?php if (empty($awaiting_payment_list)): ?>
-                <div class="empty-note">No one awaiting payment.</div>
-                <?php else: foreach ($awaiting_payment_list as $row): ?>
-                <div class="queue-card pending clickable awaiting-card" data-number="<?= (int) $row['queue_number'] ?>">
-                    <span class="queue-number"><?= htmlspecialchars($row['queue_number']) ?></span>
-                    <?php $mins = elapsed_minutes($row['interview_completed_at']); ?>
-                    <div class="info"><?= $mins !== null ? $mins . ' min away' : '' ?></div>
+                <div class="queue-grid grid-cols-2">
+                    <?php if (empty($awaiting_payment_list)): ?>
+                    <div class="empty-note">No one awaiting payment.</div>
+                    <?php else: foreach ($awaiting_payment_list as $row): ?>
+                    <div class="queue-card pending clickable awaiting-card" data-number="<?= (int) $row['queue_number'] ?>">
+                        <span class="queue-number"><?= htmlspecialchars($row['queue_number']) ?></span>
+                        <?php $mins = elapsed_minutes($row['interview_completed_at']); ?>
+                        <div class="info"><?= $mins !== null ? $mins . ' min away' : '' ?></div>
+                    </div>
+                    <?php endforeach; endif; ?>
                 </div>
-                <?php endforeach; endif; ?>
             </div>
-        </div>
 
-        <div class="queue-section" style="margin-top:22px;">
-            <h2 class="section-title accent-green">Recently Interviewed</h2>
-            <div class="queue-grid">
-                <?php if (empty($recently_interviewed)): ?>
-                <div class="empty-note">No interviews completed yet today.</div>
-                <?php else: foreach ($recently_interviewed as $row): ?>
-                <div class="queue-card">
-                    <span class="queue-number"><?= htmlspecialchars($row['queue_number']) ?></span>
-                    <?php if (!empty($row['payment_required'])): ?>
-                    <span class="badge badge-pending">FOR PAYMENT</span>
-                    <?php else: ?>
-                    <span class="badge badge-completed">NO CHARGE</span>
-                    <?php endif; ?>
-                    <div class="info"><?= $row['interview_completed_at'] ? date('g:i A', strtotime($row['interview_completed_at'])) : '' ?></div>
+            <div class="queue-section">
+                <h2 class="section-title accent-orange">Ready for Claiming</h2>
+                <form id="addClaimForm" class="toolbar-form">
+                    <label for="claim_surname">Surname</label>
+                    <input class="field" type="text" id="claim_surname" name="surname" autocomplete="off">
+                    <label for="claim_initials">First Name Initials</label>
+                    <input class="field" type="text" id="claim_initials" name="first_name_initials" placeholder="e.g. J.M." autocomplete="off" style="width:110px;">
+                    <button type="submit" name="add_claimable" class="btn">Add</button>
+                </form>
+                <div id="claimFormError" class="alert alert-error" style="display:none;width:100%;margin-top:-8px;"></div>
+
+                <div class="toolbar-form" style="margin-top:10px;">
+                    <label for="claimSearchInput">Search</label>
+                    <input class="field" type="text" id="claimSearchInput" placeholder="Surname or initials..." autocomplete="off" style="width:220px;">
+                    <button type="button" id="claimSearchClear" class="btn btn-outline btn-sm" style="display:none;">&times; Clear</button>
                 </div>
-                <?php endforeach; endif; ?>
+                <div id="claimSearchResults" class="queue-grid grid-cols-2" style="display:none;margin-top:6px;"></div>
+
+                <button type="button" id="openClaimListBtn" class="btn btn-outline" style="margin-top:14px;">Show Ready for Claiming List</button>
+
+                <div id="claimListModal" class="modal-overlay">
+                  <div class="modal-box claim-list-box">
+                    <button id="closeClaimListModal" class="modal-close" aria-label="Close">&times;</button>
+                    <h2 class="section-title accent-orange" style="margin-bottom:16px;">Ready for Claiming — Full List</h2>
+                    <div class="queue-grid grid-cols-2" id="claimGrid">
+                        <?php if (empty($claimable_results)): ?>
+                        <div class="empty-note">No results ready for claiming.</div>
+                        <?php else: foreach ($claimable_results as $row): ?>
+                        <div class="queue-card" data-claim-id="<?= (int) $row['id'] ?>">
+                            <span class="claim-name"><?= htmlspecialchars($row['surname']) ?>, <?= htmlspecialchars($row['first_name_initials']) ?></span>
+                            <form class="card-form claim-claimed-form">
+                                <button type="submit" name="mark_claimed" class="btn btn-sm">Claimed</button>
+                            </form>
+                        </div>
+                        <?php endforeach; endif; ?>
+                    </div>
+                  </div>
+                </div>
             </div>
         </div>
 
@@ -790,6 +837,230 @@ $WAITING_VISIBLE_LIMIT = 4;
                 doSearch();
             });
         });
+    })();
+    </script>
+
+    <script>
+    // --- Ready for Claiming panel: inline AJAX add + claimed (same pattern ---
+    // --- as the Payment Confirmation panel above) — never a full page reload, ---
+    // --- so submitting a name can't reset the encoder's scroll position. ---
+    (function() {
+        const form = document.getElementById('addClaimForm');
+        const grid = document.getElementById('claimGrid');
+        const surnameInput = document.getElementById('claim_surname');
+        const initialsInput = document.getElementById('claim_initials');
+        const errorBox = document.getElementById('claimFormError');
+        const searchInput = document.getElementById('claimSearchInput');
+        const searchClearBtn = document.getElementById('claimSearchClear');
+        const searchResults = document.getElementById('claimSearchResults');
+        if (!form || !grid || !surnameInput || !initialsInput || !errorBox) return;
+
+        const currentEncoderName = <?= json_encode($encoder_name) ?>;
+        const currentStation = <?= (int) $interview_station ?>;
+
+        function escapeHtml(s) {
+            const d = document.createElement('div');
+            d.textContent = s == null ? '' : s;
+            return d.innerHTML;
+        }
+
+        function claimCardHtml(id, nameText) {
+            return '<div class="queue-card" data-claim-id="' + id + '">'
+                + '<span class="claim-name">' + escapeHtml(nameText) + '</span>'
+                + '<form class="card-form claim-claimed-form"><button type="submit" name="mark_claimed" class="btn btn-sm">Claimed</button></form>'
+                + '</div>';
+        }
+
+        function resetGridEmptyState() {
+            if (!grid.querySelector('[data-claim-id]')) {
+                grid.innerHTML = '<div class="empty-note">No results ready for claiming.</div>';
+            }
+        }
+
+        // Search stays on the page permanently and drives a small inline
+        // preview under the search bar — NOT the modal, and NOT a second data
+        // source. It reads live from #claimGrid (the same authoritative list
+        // the modal shows in full), so it's always in sync with adds/claims
+        // from either place. Empty query = no preview, matching "search
+        // shouldn't require opening the list first" without also turning the
+        // preview into a second full-list view.
+        function renderSearchResults() {
+            if (!searchInput || !searchClearBtn || !searchResults) return;
+            const query = searchInput.value.trim().toLowerCase();
+            searchClearBtn.style.display = query ? 'inline-flex' : 'none';
+
+            if (query === '') {
+                searchResults.style.display = 'none';
+                searchResults.innerHTML = '';
+                return;
+            }
+
+            const matches = [];
+            grid.querySelectorAll('[data-claim-id]').forEach(function(card) {
+                const nameEl = card.querySelector('.claim-name');
+                const text = nameEl ? nameEl.textContent : '';
+                if (text.toLowerCase().indexOf(query) !== -1) {
+                    matches.push({ id: card.dataset.claimId, text: text });
+                }
+            });
+
+            searchResults.style.display = '';
+            searchResults.innerHTML = matches.length
+                ? matches.map(function(m) { return claimCardHtml(m.id, m.text); }).join('')
+                : '<div class="empty-note">No matching name.</div>';
+        }
+
+        if (searchInput && searchClearBtn && searchResults) {
+            searchInput.addEventListener('input', renderSearchResults);
+            searchClearBtn.addEventListener('click', function() {
+                searchInput.value = '';
+                renderSearchResults();
+                searchInput.focus({ preventScroll: true });
+            });
+        }
+
+        // "Show Ready for Claiming List" — full, unfiltered browse view, same
+        // .modal-overlay/.modal-box pattern as the Waiting List and No Show
+        // modals above, independent of search (search no longer lives inside it).
+        const openListBtn = document.getElementById('openClaimListBtn');
+        const listModal = document.getElementById('claimListModal');
+        const closeListBtn = document.getElementById('closeClaimListModal');
+        if (openListBtn && listModal && closeListBtn) {
+            function openClaimListModal() {
+                listModal.style.display = 'flex';
+            }
+            function closeClaimListModal() {
+                listModal.style.display = 'none';
+            }
+            openListBtn.addEventListener('click', openClaimListModal);
+            closeListBtn.addEventListener('click', closeClaimListModal);
+            // Matches noShowModal's existing click-outside-closes pattern
+            // above (addEventListener, not the waiting-list modal's plain
+            // window.onclick=, so this can't silently overwrite/be overwritten
+            // by the other modals' own outside-click handlers).
+            window.addEventListener('click', function(e) {
+                if (e.target === listModal) closeClaimListModal();
+            });
+            // None of the existing modals close on Escape.
+            document.addEventListener('keydown', function(e) {
+                if (e.key === 'Escape' && listModal.style.display === 'flex') {
+                    closeClaimListModal();
+                }
+            });
+        }
+
+        function showError(msg) {
+            errorBox.textContent = msg;
+            errorBox.style.display = 'block';
+        }
+        function clearError() {
+            errorBox.style.display = 'none';
+            errorBox.textContent = '';
+        }
+
+        function addCard(id, surname, initials) {
+            const emptyNote = grid.querySelector('.empty-note');
+            if (emptyNote) emptyNote.remove();
+            grid.insertAdjacentHTML('beforeend', claimCardHtml(id, surname + ', ' + initials));
+        }
+
+        form.addEventListener('submit', function(e) {
+            e.preventDefault();
+            const surname = surnameInput.value.trim();
+            const initials = initialsInput.value.trim();
+            clearError();
+            if (surname === '') {
+                showError('Surname is required.');
+                surnameInput.focus({ preventScroll: true });
+                return;
+            }
+            if (initials === '') {
+                showError('First name initials are required.');
+                initialsInput.focus({ preventScroll: true });
+                return;
+            }
+            const btn = form.querySelector('button[type=submit]');
+            btn.disabled = true;
+            const body = new URLSearchParams();
+            body.set('add_claimable', '1');
+            body.set('encoder_name', currentEncoderName);
+            body.set('interview_station', currentStation);
+            body.set('surname', surname);
+            body.set('first_name_initials', initials);
+            fetch('', { method: 'POST', body: body, headers: { 'X-Requested-With': 'XMLHttpRequest' } })
+                .then(function(r) { return r.json(); })
+                .then(function(res) {
+                    btn.disabled = false;
+                    if (res.ok) {
+                        addCard(res.row.id, res.row.surname, res.row.first_name_initials);
+                        renderSearchResults();
+                        surnameInput.value = '';
+                        initialsInput.value = '';
+                        surnameInput.focus({ preventScroll: true });
+                    } else {
+                        showError(res.error || 'Could not add name.');
+                    }
+                })
+                .catch(function() {
+                    btn.disabled = false;
+                    showError('Network error — please try again.');
+                });
+        });
+
+        function submitMarkClaimed(id, btn) {
+            btn.disabled = true;
+            const body = new URLSearchParams();
+            body.set('mark_claimed', '1');
+            body.set('id', id);
+            body.set('encoder_name', currentEncoderName);
+            return fetch('', { method: 'POST', body: body, headers: { 'X-Requested-With': 'XMLHttpRequest' } })
+                .then(function(r) { return r.json(); })
+                .catch(function() { return { ok: false }; })
+                .then(function(res) {
+                    if (!res.ok) btn.disabled = false;
+                    return res;
+                });
+        }
+
+        // Claiming from the modal's full list: remove the card there, then
+        // refresh the search preview in case it's showing that same name.
+        grid.addEventListener('submit', function(e) {
+            const claimForm = e.target.closest('.claim-claimed-form');
+            if (!claimForm) return;
+            e.preventDefault();
+            const card = claimForm.closest('[data-claim-id]');
+            const id = card ? card.dataset.claimId : null;
+            if (!id) return;
+            submitMarkClaimed(id, claimForm.querySelector('button[type=submit]')).then(function(res) {
+                if (res.ok) {
+                    card.remove();
+                    resetGridEmptyState();
+                    renderSearchResults();
+                }
+            });
+        });
+
+        // Claiming from the search preview: #claimGrid (the modal's list) is
+        // the authoritative source, so update it there first, then re-render
+        // the preview from that updated source rather than hand-editing both.
+        if (searchResults) {
+            searchResults.addEventListener('submit', function(e) {
+                const claimForm = e.target.closest('.claim-claimed-form');
+                if (!claimForm) return;
+                e.preventDefault();
+                const card = claimForm.closest('[data-claim-id]');
+                const id = card ? card.dataset.claimId : null;
+                if (!id) return;
+                submitMarkClaimed(id, claimForm.querySelector('button[type=submit]')).then(function(res) {
+                    if (res.ok) {
+                        const gridCard = grid.querySelector('[data-claim-id="' + id + '"]');
+                        if (gridCard) gridCard.remove();
+                        resetGridEmptyState();
+                        renderSearchResults();
+                    }
+                });
+            });
+        }
     })();
     </script>
 </body>

@@ -473,6 +473,56 @@ function get_awaiting_payment($conn, $service_date = null) {
     return $rows;
 }
 
+/**
+ * Records a "ready for claiming" entry: a patient whose results from a prior
+ * visit are ready for pickup. Unlike everything else in this file, this is
+ * standalone data entry with no queue_number/ticket behind it — service_date
+ * is stamped for reporting only, it is NOT used to scope get_claimable_results()
+ * (see that function's docblock).
+ */
+function add_claimable_result($conn, $surname, $first_name_initials, $staff_name) {
+    $service_date = service_date_now($conn);
+    $stmt = $conn->prepare(
+        "INSERT INTO claimable_results (service_date, surname, first_name_initials, added_by) VALUES (?, ?, ?, ?)"
+    );
+    $stmt->bind_param('ssss', $service_date, $surname, $first_name_initials, $staff_name);
+    $stmt->execute();
+    $id = $conn->insert_id;
+    $stmt->close();
+    return $id;
+}
+
+/**
+ * Unclaimed "ready for claiming" entries, oldest first. NOT scoped to
+ * service_date — entries persist across day rollovers until explicitly
+ * claimed via mark_result_claimed(), unlike every other list in this file.
+ */
+function get_claimable_results($conn) {
+    $stmt = $conn->prepare(
+        "SELECT * FROM claimable_results WHERE claimed_at IS NULL ORDER BY created_at ASC"
+    );
+    $stmt->execute();
+    $rows = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
+    $stmt->close();
+    return $rows;
+}
+
+/**
+ * Guarded on claimed_at IS NULL so a double-submit (two clicks/tabs) is a
+ * no-op on the second call, same pattern as the rest of this file's
+ * guarded UPDATEs.
+ */
+function mark_result_claimed($conn, $id, $staff_name) {
+    $stmt = $conn->prepare(
+        "UPDATE claimable_results SET claimed_at = NOW(), claimed_by = ? WHERE id = ? AND claimed_at IS NULL"
+    );
+    $stmt->bind_param('si', $staff_name, $id);
+    $stmt->execute();
+    $ok = $stmt->affected_rows === 1;
+    $stmt->close();
+    return $ok;
+}
+
 function get_now_serving($conn, $service_date = null) {
     $service_date = $service_date ?: service_date_now($conn);
     $stmt = $conn->prepare(

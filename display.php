@@ -2,6 +2,9 @@
 require 'config.php';
 require 'queue_functions.php';
 
+const CLAIM_SCROLL_THRESHOLD = 6; // 2 columns x 3 rows — fits without scrolling
+const CLAIM_SECONDS_PER_ROW = 2.5; // reading pace for the vertical auto-scroll
+
 $service_date = service_date_now($conn);
 $flash_duration_seconds = (int) get_setting($conn, 'flash_duration_seconds', 10);
 $announcement = get_setting($conn, 'announcement', '');
@@ -39,7 +42,29 @@ $stmt->close();
 
 // NOT ordered by queue_number — true extraction queue order, same as the
 // extraction station's own queue. See CLAUDE.md.
-$next_up = array_slice(get_extraction_queue($conn, $service_date), 0, 3);
+$next_up = array_slice(get_extraction_queue($conn, $service_date), 0, 4);
+
+// Not scoped to service_date — see get_claimable_results()'s docblock.
+// Short lists render as a single static grid. Longer lists render as a
+// continuous CSS auto-scroll (see .claim-scroll-track below): the ROW list
+// (not the raw item list) is duplicated back-to-back and the track animates
+// translateY(0 -> -50%) on an infinite linear loop. Duplicating whole rows,
+// rather than merging the raw item array into one continuous grid, matters
+// when the count is odd — a continuous grid's auto-flow would let the last
+// item of copy 1 share a row with the first item of copy 2, shifting every
+// row after that in copy 2 out of alignment with copy 1, so -50% would land
+// mid-list instead of on a duplicate of the top and the loop would visibly
+// jump. Chunking into fixed 2-item rows first, then duplicating THOSE, keeps
+// every row an atomic unit that can't be split across the copy boundary, so
+// the two halves stay pixel-identical regardless of odd/even count. Same
+// marquee technique as the footer announcement further down, just vertical.
+$claimable_results = get_claimable_results($conn);
+$claim_is_scrolling = count($claimable_results) > CLAIM_SCROLL_THRESHOLD;
+if ($claim_is_scrolling) {
+    $claim_rows = array_chunk($claimable_results, 2);
+    $claim_scroll_seconds = max(10, count($claim_rows) * CLAIM_SECONDS_PER_ROW);
+    $claim_scroll_rows_doubled = array_merge($claim_rows, $claim_rows);
+}
 
 $marquee_seconds = $announcement !== '' ? max(15, (int) round(strlen($announcement) * 0.3)) : 15;
 ?>
@@ -49,7 +74,7 @@ $marquee_seconds = $announcement !== '' ? max(15, (int) round(strlen($announceme
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Laboratory Queue Display</title>
-<link rel="stylesheet" href="assets/display.css">
+<link rel="stylesheet" href="assets/display.css?v=<?= filemtime(__DIR__ . '/assets/display.css') ?>">
 <script>
     const FLASH_DURATION_MS = <?= $flash_duration_seconds * 1000 ?>;
     const flashTimers = {};
@@ -204,16 +229,48 @@ $marquee_seconds = $announcement !== '' ? max(15, (int) round(strlen($announceme
             </div>
 
             <div class="kiosk-col pending-col">
-                <h2>NEXT FOR EXTRACTION</h2>
-                <div class="kiosk-cards next-up-cards">
-                    <?php if (empty($next_up)): ?>
-                    <div class="kiosk-empty">Please wait.</div>
-                    <?php else: foreach ($next_up as $i => $row): ?>
-                    <div class="kiosk-card next-up-card<?= $i === 0 ? ' is-next' : '' ?>">
-                        <?php if ($i === 0): ?><span class="badge badge-next">NEXT</span><?php endif; ?>
-                        <span class="queue-number"><?= htmlspecialchars($row['queue_number']) ?></span>
+                <div class="split-panels">
+                    <div class="split-panel">
+                        <h2>NEXT FOR EXTRACTION</h2>
+                        <div class="kiosk-cards next-up-cards">
+                            <?php if (empty($next_up)): ?>
+                            <div class="kiosk-empty">Please wait.</div>
+                            <?php else: foreach ($next_up as $i => $row): ?>
+                            <div class="kiosk-card next-up-card<?= $i === 0 ? ' is-next' : '' ?>">
+                                <?php if ($i === 0): ?><span class="badge badge-next">NEXT</span><?php endif; ?>
+                                <span class="queue-number"><?= htmlspecialchars($row['queue_number']) ?></span>
+                            </div>
+                            <?php endforeach; endif; ?>
+                        </div>
                     </div>
-                    <?php endforeach; endif; ?>
+                    <div class="split-panel claim-panel">
+                        <h2>READY FOR CLAIMING</h2>
+                        <?php if (empty($claimable_results)): ?>
+                        <div class="kiosk-empty">No results ready.</div>
+                        <?php elseif (!$claim_is_scrolling): ?>
+                        <div class="claim-cards">
+                            <?php foreach ($claimable_results as $row): ?>
+                            <div class="claim-card">
+                                <span class="claim-name"><?= htmlspecialchars($row['surname']) ?>, <?= htmlspecialchars($row['first_name_initials']) ?></span>
+                            </div>
+                            <?php endforeach; ?>
+                        </div>
+                        <?php else: ?>
+                        <div class="claim-scroll-viewport">
+                            <div class="claim-scroll-track" style="animation-duration:<?= $claim_scroll_seconds ?>s;">
+                                <?php foreach ($claim_scroll_rows_doubled as $claim_row): ?>
+                                <div class="claim-row">
+                                    <?php foreach ($claim_row as $row): ?>
+                                    <div class="claim-card">
+                                        <span class="claim-name"><?= htmlspecialchars($row['surname']) ?>, <?= htmlspecialchars($row['first_name_initials']) ?></span>
+                                    </div>
+                                    <?php endforeach; ?>
+                                </div>
+                                <?php endforeach; ?>
+                            </div>
+                        </div>
+                        <?php endif; ?>
+                    </div>
                 </div>
             </div>
         </div>

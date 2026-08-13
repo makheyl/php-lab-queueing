@@ -98,7 +98,7 @@ if (isset($_POST['call_next'])) {
         file_put_contents('notify.json', json_encode([
             'queue_number' => $ticket['queue_number'],
             'type' => 'extraction',
-            'timestamp' => time(),
+            'timestamp' => microtime(true),
         ]));
     }
     header('Location: ' . redirect_url($post_name));
@@ -129,7 +129,7 @@ if (isset($_POST['recall'])) {
         file_put_contents('notify.json', json_encode([
             'queue_number' => $ticket['queue_number'],
             'type' => 'extraction',
-            'timestamp' => time(),
+            'timestamp' => microtime(true),
         ]));
     }
     header('Location: ' . redirect_url($post_name));

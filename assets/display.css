@@ -567,3 +567,109 @@ body.lab-board .next-up-card .queue-number {
 body.lab-board .next-up-card.is-next .queue-number {
     color: #a85800;
 }
+
+/* ---------- Ready for Claiming ----------
+   The right-hand section splits pending-col's existing real estate into two
+   side-by-side panels (NEXT FOR EXTRACTION | READY FOR CLAIMING) instead of
+   adding a 4th top-level kiosk-col. Scoped to body.lab-board, same strategy
+   as the contrast fixes above, since .pending-col/.kiosk-cards are also used
+   by display_backgrounded.php and must keep rendering unchanged there. */
+body.lab-board .kiosk-col.pending-col {
+    flex: 1.7 1 0;
+    min-width: 340px;
+    max-width: 38vw;
+}
+.split-panels {
+    display: flex;
+    flex-direction: row;
+    gap: 0.6vw;
+    width: 100%;
+    flex: 1 1 auto;
+}
+.split-panel {
+    flex: 1 1 0;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+}
+
+/* NEXT FOR EXTRACTION now shares half its old width, so drop 3 columns to 2.
+   Matches (rather than just beats) OPD's ".pending-col .kiosk-cards" rule's
+   specificity above so this wins reliably rather than depending on source
+   order — next-up-cards carries the shared .kiosk-cards class too. */
+body.lab-board .pending-col .next-up-cards {
+    grid-template-columns: repeat(2, 1fr);
+}
+
+/* READY FOR CLAIMING uses its own classes rather than .kiosk-cards/.kiosk-card,
+   so it doesn't inherit sizing meant for big digit counters (fixed height +
+   overflow:hidden) that would clip wrapping name text. */
+.claim-cards {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 0.5vw;
+    width: 100%;
+    justify-items: center;
+}
+
+/* Continuous vertical auto-scroll for long claim lists — same technique as
+   .kiosk-announcement-track's horizontal marquee below (fixed-size clipping
+   viewport + an animated translate, duration set inline per-page from PHP),
+   just translateY instead of translateX. display.php only renders this
+   wrapper when the list doesn't fit statically (see CLAIM_SCROLL_THRESHOLD),
+   and duplicates $claim_rows (2-item ROW groups, not raw items) into
+   $claim_scroll_rows_doubled first, rendering each row as its own
+   .claim-row block. Every row therefore carries its OWN margin-bottom
+   instead of a shared grid/flex "gap" — with a shared gap, the space
+   between copy 1's last row and copy 2's first row would be identical in
+   size but structurally a one-off extra, which throws translateY(-50%) off
+   by half a gap. Giving every row (including the last one in each copy)
+   the same self-contained margin-bottom makes the whole track perfectly
+   periodic — 2x the same repeating unit — so -50% is exactly one copy's
+   height, and lands on content pixel-identical to the top, no matter the
+   row count or gap size. */
+.claim-scroll-viewport {
+    width: 100%;
+    height: clamp(150px, 18vw, 230px);
+    overflow: hidden;
+}
+.claim-scroll-track {
+    animation-name: claim-scroll;
+    animation-timing-function: linear;
+    animation-iteration-count: infinite;
+}
+@keyframes claim-scroll {
+    from { transform: translateY(0); }
+    to { transform: translateY(-50%); }
+}
+.claim-row {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 0.5vw;
+    width: 100%;
+    justify-items: center;
+    margin-bottom: 0.5vw;
+}
+.claim-card {
+    width: 100%;
+    min-height: clamp(50px, 6vw, 74px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    background: var(--surface);
+    border: 2px solid var(--green);
+    border-radius: 1vw;
+    box-shadow: var(--shadow-sm);
+    padding: 0.4vw 0.5vw;
+    box-sizing: border-box;
+}
+.claim-name {
+    font-size: clamp(0.75rem, 1.3vw, 1.15rem);
+    font-weight: 700;
+    color: #1a7a45; /* same contrast-corrected green as the rest of lab-board's accents */
+    line-height: 1.25;
+    white-space: normal;
+    word-break: break-word;
+}
