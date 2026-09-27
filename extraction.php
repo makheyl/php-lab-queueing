@@ -2,6 +2,7 @@
 session_start();
 require 'config.php';
 require 'queue_functions.php';
+require 'app_header.php';
 
 // There is only one extraction station in this clinic — no bay number to
 // prompt for or display. Kept as a plain constant (not a UI-facing value)
@@ -9,6 +10,9 @@ require 'queue_functions.php';
 // as columns; if a second station is ever added, this is the one place to
 // change.
 const EXTRACTION_STATION = 1;
+
+// Numbers shown in "Next in line".
+const NEXT_IN_LINE_LIMIT = 8;
 
 // ---------- local helpers ----------
 
@@ -19,15 +23,6 @@ function redirect_url($phlebotomist_name) {
 function elapsed_minutes($datetime) {
     if (!$datetime) return null;
     return (int) floor((time() - strtotime($datetime)) / 60);
-}
-
-function count_where($conn, $service_date, $where_sql, $extra_types = '', $extra_params = []) {
-    $stmt = $conn->prepare("SELECT COUNT(*) AS cnt FROM queue WHERE service_date = ? AND $where_sql");
-    $stmt->bind_param('s' . $extra_types, $service_date, ...$extra_params);
-    $stmt->execute();
-    $row = $stmt->get_result()->fetch_assoc();
-    $stmt->close();
-    return (int) $row['cnt'];
 }
 
 /**
@@ -78,10 +73,10 @@ function update_daily_statistics($conn, $date, $station, $staff_name, $action, $
 
 $phlebotomist_name = '';
 if (isset($_GET['phlebotomist_name'])) {
-    $phlebotomist_name = $_GET['phlebotomist_name'];
+    $phlebotomist_name = trim($_GET['phlebotomist_name']);
     $_SESSION['phlebotomist_name'] = $phlebotomist_name;
 } elseif (isset($_POST['phlebotomist_name'])) {
-    $phlebotomist_name = $_POST['phlebotomist_name'];
+    $phlebotomist_name = trim($_POST['phlebotomist_name']);
     $_SESSION['phlebotomist_name'] = $phlebotomist_name;
 } elseif (isset($_SESSION['phlebotomist_name'])) {
     $phlebotomist_name = $_SESSION['phlebotomist_name'];
@@ -93,13 +88,8 @@ if (isset($_POST['call_next'])) {
     $post_name = $_POST['phlebotomist_name'];
     $ticket = call_next_extraction($conn, EXTRACTION_STATION, $post_name);
     if ($ticket) {
-        // Same notify.json shape as index.php's interview calls (type + station),
-        // so display.php can pick the right sentence for each.
-        file_put_contents('notify.json', json_encode([
-            'queue_number' => $ticket['queue_number'],
-            'type' => 'extraction',
-            'timestamp' => microtime(true),
-        ]));
+        // display.php picks the "proceed to extraction" sentence from the type.
+        announce_call($ticket['queue_number'], 'extraction');
     }
     header('Location: ' . redirect_url($post_name));
     exit();
@@ -126,11 +116,7 @@ if (isset($_POST['recall'])) {
     $ticket = find_queue_row($conn, $id);
     $ok = recall($conn, $id, $post_name);
     if ($ok && $ticket) {
-        file_put_contents('notify.json', json_encode([
-            'queue_number' => $ticket['queue_number'],
-            'type' => 'extraction',
-            'timestamp' => microtime(true),
-        ]));
+        announce_call($ticket['queue_number'], 'extraction');
     }
     header('Location: ' . redirect_url($post_name));
     exit();
@@ -151,17 +137,16 @@ if (isset($_POST['no_show'])) {
 
 // ---------- render ----------
 
-$has_identity = $phlebotomist_name !== '';
+$show_name_card = $phlebotomist_name === '' || isset($_GET['change']);
 $service_date = service_date_now($conn);
 
-if ($has_identity) {
-    $ready_for_extraction_count = count_where($conn, $service_date, "status = 'ready_for_extraction'");
-    $now_extracting_count = count_where($conn, $service_date, "status = 'extracting'");
-    $completed_count = count_where($conn, $service_date, "status = 'completed'");
-
+if ($show_name_card) {
+    $recent_names = get_recent_staff_names($conn);
+} else {
     // NOT ordered by queue_number — a patient who left to pay rejoins at the back
-    // based on when payment was confirmed. See CLAUDE.md §11.
+    // based on when payment was confirmed. See get_extraction_queue().
     $extraction_queue = get_extraction_queue($conn, $service_date);
+    $recall_limit = (int) get_setting($conn, 'recall_limit', 3);
 
     $stmt = $conn->prepare(
         "SELECT * FROM queue WHERE service_date = ? AND status = 'extracting' LIMIT 1"
@@ -185,187 +170,133 @@ if ($has_identity) {
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Laboratory Queueing — Extraction Station</title>
-<link rel="stylesheet" href="assets/theme.css">
+<title>Laboratory Queueing — Extraction</title>
+<link rel="stylesheet" href="assets/theme.css?v=<?= filemtime(__DIR__ . '/assets/theme.css') ?>">
 <style>
-    .current-ticket-card { width: auto; min-width: 220px; padding: 28px 24px; }
-    .current-ticket-card .queue-number { font-size: 3rem; }
-    .kbd-legend { text-align: center; font-size: 0.78rem; color: var(--text-muted); margin-bottom: 14px; }
-    .kbd-legend kbd {
-        display: inline-block; min-width: 1.4em; padding: 1px 6px; margin: 0 2px;
-        border: 1px solid var(--border); border-radius: 5px; background: var(--surface-alt);
-        font-family: var(--font); font-weight: 700; color: var(--text);
-    }
+    .pay-tag { display: inline-block; font-size: 0.8rem; font-weight: 700; padding: 3px 12px; border-radius: var(--radius-pill); background: var(--surface); border: 1px solid var(--border); color: var(--text-muted); }
+    .completed-line { font-size: 1.05rem; font-weight: 700; color: var(--text); letter-spacing: 0.02em; }
 </style>
-<script>
-    // --- Auto-refresh on DB update ---
-    let lastStatus = null;
-    async function pollQueueStatus() {
-        try {
-            const res = await fetch('queue_status.php');
-            if (!res.ok) return;
-            const data = await res.json();
-            if (lastStatus === null) {
-                lastStatus = JSON.stringify(data);
-            } else if (JSON.stringify(data) !== lastStatus) {
-                location.reload();
-            }
-        } catch (e) {}
-        setTimeout(pollQueueStatus, 1000);
-    }
-    pollQueueStatus();
-</script>
 </head>
 <body>
-    <div class="app-header">
-        <img src="CHO.png" alt="CHO Logo" class="logo-img">
-        <div class="title">Laboratory Queueing</div>
-        <div class="subtitle">Extraction Station</div>
-    </div>
-    <div class="page page-wide">
-        <form class="toolbar-form" method="get">
-            <label for="phlebotomist_name">Your Name</label>
-            <input class="field" type="text" id="phlebotomist_name" name="phlebotomist_name" value="<?= htmlspecialchars($phlebotomist_name) ?>" required>
-            <button type="submit" class="btn">Set</button>
-        </form>
-
-        <?php if ($has_identity): ?>
-        <div class="kbd-legend no-print">
-            Keyboard: <kbd>N</kbd> Call Next &nbsp; <kbd>C</kbd> Complete &nbsp; <kbd>R</kbd> Recall &nbsp; <kbd>S</kbd> No Show
+    <?php render_app_header('extraction', $show_name_card ? '' : $phlebotomist_name, 'extraction.php?change=1'); ?>
+    <div class="page">
+        <?php if ($show_name_card): ?>
+        <div class="name-card">
+            <h2>Who's at extraction?</h2>
+            <p>Type or pick your name. It's saved with every patient you serve.</p>
+            <form method="get">
+                <input class="field" type="text" name="phlebotomist_name" list="recentNames" value="<?= htmlspecialchars($phlebotomist_name) ?>" placeholder="Your name" autocomplete="off" required autofocus>
+                <button type="submit" class="btn">Start</button>
+            </form>
+            <datalist id="recentNames">
+                <?php foreach ($recent_names as $name): ?>
+                <option value="<?= htmlspecialchars($name) ?>">
+                <?php endforeach; ?>
+            </datalist>
         </div>
-        <div class="stat-cards">
-            <div class="stat-card">
-                <span class="stat-label">Ready for Extraction</span>
-                <span class="stat-value"><?= $ready_for_extraction_count ?></span>
-            </div>
-            <div class="stat-card">
-                <span class="stat-label">Now Extracting</span>
-                <span class="stat-value"><?= $now_extracting_count ?></span>
-            </div>
-            <div class="stat-card">
-                <span class="stat-label">Completed Today</span>
-                <span class="stat-value"><?= $completed_count ?></span>
-            </div>
-        </div>
+        <?php else: ?>
 
-        <div class="main-columns">
-            <div class="queue-section">
-                <h2 class="section-title accent-green">Extraction Queue (<?= count($extraction_queue) ?>)</h2>
-                <div class="queue-grid">
-                    <?php if (empty($extraction_queue)): ?>
-                    <div class="empty-note">No one waiting for extraction.</div>
-                    <?php else: foreach (array_slice($extraction_queue, 0, 3) as $row): $mins = elapsed_minutes($row['extraction_eligible_at']); ?>
-                    <div class="queue-card">
-                        <span class="queue-number"><?= htmlspecialchars($row['queue_number']) ?></span>
-                        <?php if (!empty($row['payment_required'])): ?>
-                        <span class="badge badge-completed">PAID</span>
-                        <?php else: ?>
-                        <span class="badge badge-pending">NO CHARGE</span>
-                        <?php endif; ?>
-                        <div class="info"><?= $mins !== null ? $mins . ' min waiting' : '' ?></div>
+        <div class="work-area">
+            <section class="hero-card" aria-label="Now extracting">
+                <div class="hero-label">Now Extracting</div>
+                <?php if ($current_ticket): $called_mins = elapsed_minutes($current_ticket['extraction_called_at']); $recalls = (int) $current_ticket['recall_count']; ?>
+                    <div class="hero-number"><?= htmlspecialchars($current_ticket['queue_number']) ?></div>
+                    <div class="hero-meta">
+                        Called <?= $called_mins !== null && $called_mins > 0 ? $called_mins . ' min ago' : 'just now' ?><?= $recalls > 0 ? ' · called again ' . $recalls . '×' : '' ?>
                     </div>
-                    <?php endforeach;
-                    if (count($extraction_queue) > 3): ?>
-                    <div class="empty-note">+<?= count($extraction_queue) - 3 ?> more waiting</div>
-                    <?php endif; endif; ?>
-                </div>
-            </div>
+                    <span class="pay-tag"><?= !empty($current_ticket['payment_required']) ? 'PAID' : 'NO CHARGE' ?></span>
 
-            <div class="queue-section">
-                <h2 class="section-title accent-green">Now Extracting</h2>
-                <?php if ($current_ticket): $mins = elapsed_minutes($current_ticket['extraction_called_at']); ?>
-                    <div class="queue-card current-ticket-card">
-                        <span class="queue-number"><?= htmlspecialchars($current_ticket['queue_number']) ?></span>
-                        <div class="info"><?= $mins !== null ? $mins . ' min' : '' ?></div>
-                        <?php if ((int) $current_ticket['recall_count'] > 0): ?>
-                        <div class="info">Recalled <?= (int) $current_ticket['recall_count'] ?>x</div>
-                        <?php endif; ?>
+                    <div class="hero-actions">
+                        <form method="post">
+                            <input type="hidden" name="id" value="<?= (int) $current_ticket['id'] ?>">
+                            <input type="hidden" name="phlebotomist_name" value="<?= htmlspecialchars($phlebotomist_name) ?>">
+                            <button type="submit" name="complete" class="btn btn-big" data-key="C"><span>COMPLETE<kbd>C</kbd></span><small>Extraction done</small></button>
+                        </form>
                     </div>
-                    <div class="card-actions" style="margin-top:14px;">
-                        <form method="post" style="display:inline">
-                            <input type="hidden" name="id" value="<?= $current_ticket['id'] ?>">
+
+                    <div class="hero-more">
+                        <form method="post">
+                            <input type="hidden" name="id" value="<?= (int) $current_ticket['id'] ?>">
                             <input type="hidden" name="phlebotomist_name" value="<?= htmlspecialchars($phlebotomist_name) ?>">
-                            <button type="submit" name="complete" class="btn">COMPLETE</button>
+                            <button type="submit" name="recall" class="btn btn-outline btn-sm" data-key="R" <?= $recalls >= $recall_limit ? 'disabled title="Called ' . $recalls . ' times already. Mark as No Show if they are not here."' : '' ?>>Call again<kbd>R</kbd></button>
                         </form>
-                        <form method="post" style="display:inline">
-                            <input type="hidden" name="id" value="<?= $current_ticket['id'] ?>">
-                            <input type="hidden" name="phlebotomist_name" value="<?= htmlspecialchars($phlebotomist_name) ?>">
-                            <button type="submit" name="recall" class="btn btn-info">RECALL</button>
-                        </form>
-                        <form method="post" style="display:inline">
-                            <input type="hidden" name="id" value="<?= $current_ticket['id'] ?>">
-                            <input type="hidden" name="phlebotomist_name" value="<?= htmlspecialchars($phlebotomist_name) ?>">
-                            <button type="submit" name="no_show" class="btn btn-neutral">NO SHOW</button>
-                        </form>
+                        <button type="button" class="btn btn-outline btn-sm" data-key="S" data-open-dialog="noShowDialog">No show<kbd>S</kbd></button>
+                    </div>
+
+                    <div id="noShowDialog" class="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="noShowTitle">
+                        <div class="modal-box dialog-box">
+                            <h3 id="noShowTitle">Mark #<?= htmlspecialchars($current_ticket['queue_number']) ?> as No Show?</h3>
+                            <p>Use this when the patient didn't come after being called.</p>
+                            <form method="post" class="dialog-actions">
+                                <input type="hidden" name="id" value="<?= (int) $current_ticket['id'] ?>">
+                                <input type="hidden" name="phlebotomist_name" value="<?= htmlspecialchars($phlebotomist_name) ?>">
+                                <button type="button" class="btn btn-outline" data-close-dialog>Cancel</button>
+                                <button type="submit" name="no_show" class="btn btn-warning">Yes, No Show</button>
+                            </form>
+                        </div>
                     </div>
                 <?php else: ?>
-                    <div class="empty-note">No one currently in extraction.</div>
+                    <div class="hero-empty">No patient in the extraction room.</div>
+                    <form method="post" id="callNextForm">
+                        <input type="hidden" name="phlebotomist_name" value="<?= htmlspecialchars($phlebotomist_name) ?>">
+                        <?php if (empty($extraction_queue)): ?>
+                        <button type="submit" name="call_next" class="btn btn-big" disabled><span>CALL NEXT</span><small>No one ready yet</small></button>
+                        <?php else: ?>
+                        <button type="submit" name="call_next" class="btn btn-big" data-key="N">
+                            <span>CALL NEXT<kbd>N</kbd></span>
+                            <small><?= count($extraction_queue) ?> ready · next is #<?= (int) $extraction_queue[0]['queue_number'] ?></small>
+                        </button>
+                        <?php endif; ?>
+                    </form>
                 <?php endif; ?>
+            </section>
 
-                <form method="post" id="callNextForm" style="margin-top:18px;">
-                    <input type="hidden" name="phlebotomist_name" value="<?= htmlspecialchars($phlebotomist_name) ?>">
-                    <button type="submit" name="call_next" class="btn" <?= $current_ticket ? 'disabled' : '' ?>>CALL NEXT</button>
-                </form>
-            </div>
+            <aside>
+                <section class="side-panel" aria-label="Next in line">
+                    <h3>Next in Line <span class="count"><?= count($extraction_queue) ?></span></h3>
+                    <?php if (empty($extraction_queue)): ?>
+                    <div class="empty-note">No one waiting for extraction.</div>
+                    <?php else: ?>
+                    <div class="chip-list">
+                        <?php foreach (array_slice($extraction_queue, 0, NEXT_IN_LINE_LIMIT) as $i => $row): ?>
+                        <span class="chip<?= $i === 0 ? ' is-next' : '' ?>"><?= (int) $row['queue_number'] ?><small><?= !empty($row['payment_required']) ? 'paid' : 'no charge' ?></small></span>
+                        <?php endforeach; ?>
+                    </div>
+                    <?php if (count($extraction_queue) > NEXT_IN_LINE_LIMIT): ?>
+                    <p class="hint">+<?= count($extraction_queue) - NEXT_IN_LINE_LIMIT ?> more waiting</p>
+                    <?php endif; ?>
+                    <p class="hint">In calling order: patients back from payment join at the end.</p>
+                    <?php endif; ?>
+                </section>
+
+                <section class="side-panel" aria-label="Just completed">
+                    <h3>Just Completed</h3>
+                    <?php if (empty($recently_completed)): ?>
+                    <div class="empty-note">No completions yet today.</div>
+                    <?php else: ?>
+                    <div class="completed-line"><?= implode(' · ', array_map(function ($r) { return (int) $r['queue_number']; }, $recently_completed)) ?></div>
+                    <p class="hint">Last done at <?= date('g:i A', strtotime($recently_completed[0]['extraction_completed_at'])) ?></p>
+                    <?php endif; ?>
+                </section>
+            </aside>
         </div>
 
-        <div class="queue-section" style="margin-top:22px;">
-            <h2 class="section-title accent-green">Recently Completed</h2>
-            <div class="queue-grid">
-                <?php if (empty($recently_completed)): ?>
-                <div class="empty-note">No completions yet today.</div>
-                <?php else: foreach ($recently_completed as $row): ?>
-                <div class="queue-card completed">
-                    <span class="queue-number"><?= htmlspecialchars($row['queue_number']) ?></span>
-                    <div class="info"><?= $row['extraction_completed_at'] ? date('g:i A', strtotime($row['extraction_completed_at'])) : '' ?></div>
-                </div>
-                <?php endforeach; endif; ?>
-            </div>
-        </div>
         <?php endif; ?>
     </div>
 
+    <script src="assets/app.js?v=<?= filemtime(__DIR__ . '/assets/app.js') ?>"></script>
+    <?php if (!$show_name_card): ?>
     <script>
-        const callNextForm = document.getElementById('callNextForm');
-        if (callNextForm) {
-            callNextForm.addEventListener('submit', function() {
-                const btn = this.querySelector('button[type=submit]');
-                if (btn) {
-                    btn.blur();
-                }
-            });
-        }
+    LabUI.startPolling({ interval: 1000 });
 
-        // Keyboard shortcuts (see the legend above the stat cards), ignored
-        // while typing in a field. A no-op if the matching button isn't
-        // present/enabled — e.g. N does nothing once a ticket is already active.
-        document.addEventListener('keydown', function(e) {
-            if (e.altKey || e.ctrlKey || e.metaKey) return;
-            const tag = (document.activeElement && document.activeElement.tagName || '').toLowerCase();
-            if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
-
-            const shortcuts = {
-                N: '#callNextForm button[type=submit]',
-                C: 'button[name=complete]',
-                R: 'button[name=recall]',
-                S: 'button[name=no_show]',
-            };
-            const selector = shortcuts[e.key.toUpperCase()];
-            if (!selector) return;
-            const btn = document.querySelector(selector);
-            if (btn && !btn.disabled) {
-                e.preventDefault();
-                btn.click();
-            }
-        });
-
-        // Focus management: land on the most likely next action after every
-        // reload, so shortcuts work immediately without a mouse click first.
-        (function() {
-            const completeBtn = document.querySelector('button[name=complete]');
-            const target = completeBtn || (callNextForm ? callNextForm.querySelector('button[type=submit]') : null);
-            if (target) target.focus();
-        })();
+    // Focus the most likely next action after every reload, so Enter and the
+    // keyboard letters work without a mouse click first.
+    (function() {
+        const target = document.querySelector('button[name=complete]')
+            || document.querySelector('button[name=call_next]:not([disabled])');
+        if (target) target.focus();
+    })();
     </script>
+    <?php endif; ?>
 </body>
 </html>

@@ -673,3 +673,28 @@ body.lab-board .pending-col .next-up-cards {
     white-space: normal;
     word-break: break-word;
 }
+
+/* ---------- "Tap to turn on voice announcements" (display.php) ----------
+   Shown only when the browser blocks speech until someone taps the screen.
+   Opening the board from the Display Board shortcut avoids it entirely. */
+.sound-prompt {
+    position: fixed;
+    inset: 0;
+    z-index: 2000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(23, 32, 46, 0.72);
+    cursor: pointer;
+}
+.sound-prompt-box {
+    background: var(--surface);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-md);
+    padding: clamp(24px, 3vw, 56px) clamp(28px, 4vw, 72px);
+    text-align: center;
+    max-width: 70vw;
+}
+.sound-prompt-icon { font-size: clamp(3rem, 6vw, 6rem); line-height: 1; }
+.sound-prompt-title { margin-top: 1.2vw; font-size: clamp(1.6rem, 3vw, 3.2rem); font-weight: 800; color: var(--text); }
+.sound-prompt-text { margin-top: 0.8vw; font-size: clamp(1rem, 1.4vw, 1.6rem); color: var(--text-muted); }

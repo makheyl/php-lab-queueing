@@ -133,6 +133,36 @@ CREATE TABLE IF NOT EXISTS `settings` (
 | `recall_limit` | `3` | Max recalls before a ticket should be marked no-show |
 | `announcement` | *(empty)* | Free-text line scrolled in `display.php`'s footer |
 | `queue_retention_days` | `30` | `daily_reset.php` purges `queue` rows older than this; `0` disables purging |
+| `ticket_printing_enabled` | `1` | `0` = PRINT NEXT NUMBER still issues numbers but prints nothing (printer down) |
+| `ticket_header` | `CITY HEALTH OFFICE` | First line of the printed ticket |
+| `ticket_subheader` | `LABORATORY` | Second line of the printed ticket |
+| `ticket_footer` | *(keep-this-ticket note)* | Text under the number; line breaks are kept |
+| `ticket_show_logo` | `1` | Print `CHO.png` at the top of the ticket |
+| `ticket_show_waiting` | `1` | Print "N people waiting ahead of you" |
+| `ticket_width_mm` | `72` | Ticket print width (48-80 mm); 72 fits the XP-80T's printable area |
+
+The `ticket_*` settings are edited on `printer_setup.php`; the rest are
+edited directly in the table.
+
+### 6. `claimable_results`
+"Ready for Claiming" entries: patients whose results from a prior visit are
+ready for pickup. Standalone data entry, not tied to a queue ticket, and
+listed across service days until claimed (see `get_claimable_results()`).
+
+```sql
+CREATE TABLE IF NOT EXISTS `claimable_results` (
+  `id` int(11) NOT NULL AUTO_INCREMENT,
+  `service_date` date NOT NULL,
+  `surname` varchar(100) NOT NULL,
+  `first_name_initials` varchar(20) NOT NULL,
+  `added_by` varchar(100) DEFAULT NULL,
+  `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+  `claimed_at` datetime DEFAULT NULL,
+  `claimed_by` varchar(100) DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  KEY `idx_claimed_created` (`claimed_at`, `created_at`)
+);
+```
 
 ## Setup Instructions
 
@@ -190,14 +220,20 @@ PHPLabQueueing/
 ├── test_database.php       # CLI: verifies schema + settings seed
 ├── test_queue_logic.php    # CLI: verifies queue_functions.php behavior end-to-end
 ├── daily_reset.php         # CLI: scheduled daily rollover housekeeping
-├── index.php                # Encoder console (add numbers, run interviews, confirm payments)
+├── index.php                # Front Desk (print numbers, interview, confirm payments on return)
+├── claiming.php             # Claiming (results ready for pickup: search, add, mark claimed)
+├── ticket_print.php         # One 80 mm ticket, printed by the ticket station's browser (read-only)
+├── printer_setup.php        # Printer: ticket station, ticket settings, Test Print, checklist
 ├── extraction.php           # Extraction station
 ├── admin.php                 # Reports
+├── app_header.php            # Shared green header + top menu for the staff screens
 ├── display.php                # Public kiosk board
 ├── queue_status.php            # JSON polling endpoint (counts + last_update)
-├── clear_notify.php             # JSON polling endpoint; resets notify.json to '{}'
-├── notify.json                   # Runtime state file — the voice-announcement channel
-├── assets/theme.css                # Shared theme (index/extraction/admin)
+├── clear_notify.php             # Legacy: resets notify.json to '{}' (display.php no longer calls it)
+├── notify.json                   # Runtime state file — last 20 voice announcements (announce_call())
+├── assets/theme.css                # Shared theme for the staff screens
+├── assets/app.js                   # Shared staff-screen behavior: auto-refresh that waits
+│                                     while someone is typing, pop-ups, keyboard shortcuts
 ├── assets/display.css               # Kiosk theme (display.php) — OPD's original rules are
 │                                      untouched; lab additions are appended at the bottom
 └── report_month_YYYY_MM.csv          # Generated monthly export, not source
@@ -205,21 +241,32 @@ PHPLabQueueing/
 
 ## Usage
 
-### For encoders (`index.php`):
-1. Set your name and interview station in the header
-2. Add numbers as patients take them at the entrance
-3. Call Next, then FOR PAYMENT or NO CHARGE to route the ticket
-4. Use the Payment Confirmation panel when a patient returns from city hall
+All staff screens share one top menu (Front Desk · Claiming · Extraction ·
+Reports · Printer). See `OPERATIONS.md` "Screens at a glance".
+
+### For encoders (Front Desk, `index.php`):
+1. Type or pick your name on the "Who's at the front desk?" card (one
+   interview window, so there's no window number)
+2. On the ticket station PC, click PRINT NEXT NUMBER (or press `T`) for each
+   arriving patient. The XP-80T prints the next number for today; see
+   `OPERATIONS.md` "Ticket printer (XP-80T)" and `printer_setup.php`
+3. CALL NEXT, then FOR PAYMENT or NO CHARGE to route the patient
+4. When a patient returns from City Hall, tap their number under Back from
+   Payment and confirm (OR number optional)
+
+### For results claiming (`claiming.php`):
+1. Search a surname to find a patient's name; tap Claimed when they pick up
+2. "+ Add name" adds a patient whose results are ready
 
 ### For phlebotomists (`extraction.php`):
-1. Set your name (there's only one extraction station, so nothing else to set)
-2. Call Next, then COMPLETE / RECALL / NO SHOW
+1. Type or pick your name (there's only one extraction station)
+2. CALL NEXT, then COMPLETE; Call again / No show if the patient doesn't come
 
-### For administrators (`admin.php`):
-1. Filter by Day / Week / Month
-2. Review summary tiles, timing metrics, hourly volume, and per-staff throughput
-3. Filter the activity log by number, staff, action, or date range
-4. Export to CSV or print
+### For administrators (Reports, `admin.php`):
+1. Pick Today / This Week / This Month (or Other day)
+2. Review the summary, average times, busiest hours, and per-staff numbers
+3. Show the activity log and search it by number, staff, or what happened
+4. Export CSV or print
 
 ## Monitoring Queries
 

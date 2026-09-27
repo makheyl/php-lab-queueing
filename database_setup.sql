@@ -94,6 +94,23 @@ CREATE TABLE IF NOT EXISTS `historical_data` (
   KEY `idx_exported` (`exported_to_csv`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
+-- Create claimable_results table if it doesn't exist
+-- "Ready for Claiming" entries: patients whose results from a prior visit are
+-- ready for pickup. Standalone data entry, not tied to a queue ticket, and
+-- listed across service days until claimed — see get_claimable_results().
+CREATE TABLE IF NOT EXISTS `claimable_results` (
+  `id` int(11) NOT NULL AUTO_INCREMENT,
+  `service_date` date NOT NULL,
+  `surname` varchar(100) NOT NULL,
+  `first_name_initials` varchar(20) NOT NULL,
+  `added_by` varchar(100) DEFAULT NULL,
+  `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+  `claimed_at` datetime DEFAULT NULL,
+  `claimed_by` varchar(100) DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  KEY `idx_claimed_created` (`claimed_at`, `created_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
 -- Create settings table if it doesn't exist
 CREATE TABLE IF NOT EXISTS `settings` (
   `key` varchar(50) NOT NULL,
@@ -107,5 +124,13 @@ INSERT INTO `settings` (`key`, `value`) VALUES
   ('flash_duration_seconds', '10'),
   ('recall_limit', '3'),
   ('announcement', ''),
-  ('queue_retention_days', '30')
+  ('queue_retention_days', '30'),
+  -- Ticket printer (XP-80T) settings, editable on printer_setup.php
+  ('ticket_printing_enabled', '1'),
+  ('ticket_header', 'CITY HEALTH OFFICE'),
+  ('ticket_subheader', 'LABORATORY'),
+  ('ticket_footer', 'Please keep this ticket. Your number is used for interview, payment and extraction.'),
+  ('ticket_show_logo', '1'),
+  ('ticket_show_waiting', '1'),
+  ('ticket_width_mm', '72')
 ON DUPLICATE KEY UPDATE `key` = `key`;

@@ -545,3 +545,223 @@ select.field { cursor: pointer; }
     .page { box-shadow: none !important; margin: 0 !important; max-width: none !important; padding: 0 !important; }
     body { background: #fff !important; }
 }
+
+/* =========================================================
+   Simplified staff screens — Front Desk, Claiming, Extraction,
+   Reports, Printer Setup. One job per screen, one obvious next
+   button. Shared header/menu comes from app_header.php, shared
+   behavior from assets/app.js.
+   ========================================================= */
+
+/* The hidden attribute must win over component display rules (e.g. a
+   display:flex form toggled open by script). */
+[hidden] { display: none !important; }
+
+/* ---------- Top menu ---------- */
+.app-header .app-nav { display: flex; flex-wrap: wrap; gap: 4px; margin-left: 12px; }
+.app-header .app-nav a {
+    color: #fff;
+    text-decoration: none;
+    font-weight: 600;
+    font-size: 0.92rem;
+    padding: 7px 13px;
+    border-radius: var(--radius-sm);
+    transition: background .15s ease;
+}
+.app-header .app-nav a:hover { background: rgba(255, 255, 255, 0.2); }
+.app-header .app-nav a.active { background: var(--surface); color: var(--text); }
+.app-header .staff-id { margin-left: auto; color: #fff; font-weight: 700; font-size: 0.95rem; white-space: nowrap; }
+.app-header .staff-id a { color: #fff; font-weight: 600; margin-left: 2px; }
+
+/* ---------- Pop-ups (opened by assets/app.js) ---------- */
+.modal-overlay.open { display: flex; }
+.modal-box.dialog-box { max-width: 380px; max-height: none; text-align: center; padding: 26px 24px 22px; }
+.dialog-box h3 { font-size: 1.15rem; margin-bottom: 6px; }
+.dialog-box p { color: var(--text-muted); font-size: 0.92rem; margin: 0 0 16px; }
+.dialog-box .dialog-number { font-size: 3.4rem; font-weight: 800; line-height: 1; margin: 8px 0 4px; }
+.dialog-box .field { width: 100%; margin-bottom: 14px; }
+.dialog-box .alert { margin: 12px 0 0; }
+.dialog-actions { display: flex; gap: 10px; }
+.dialog-actions .btn { flex: 1 1 0; min-width: 0; }
+
+/* ---------- Messages ---------- */
+.alert-success { background: var(--green-light); color: var(--green-dark); }
+.alert-notice { background: var(--yellow-light); color: var(--yellow); }
+.alert.fading { opacity: 0; transition: opacity .6s ease; }
+
+/* Pop-up notifications (top-right), e.g. "Ticket #24 is printing". */
+.toast-stack {
+    position: fixed;
+    top: 84px;
+    right: 20px;
+    z-index: 1100;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    width: min(360px, calc(100vw - 40px));
+    pointer-events: none;
+}
+.toast {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-left: 5px solid var(--green);
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow-lg);
+    padding: 14px 16px;
+    color: var(--text);
+    font-weight: 600;
+    font-size: 0.95rem;
+    line-height: 1.35;
+    pointer-events: auto;
+    animation: toast-in .25s ease;
+}
+.toast .toast-icon {
+    flex: 0 0 auto;
+    width: 26px;
+    height: 26px;
+    border-radius: 50%;
+    background: var(--green-light);
+    color: var(--green-dark);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 800;
+}
+.toast .toast-title { display: block; font-size: 1.05rem; font-weight: 800; }
+.toast.toast-warning { border-left-color: var(--orange); }
+.toast.toast-warning .toast-icon { background: var(--orange-light); color: var(--orange-dark); }
+.toast.fading { opacity: 0; transform: translateY(-6px); transition: opacity .6s ease, transform .6s ease; }
+@keyframes toast-in { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: none; } }
+
+/* ---------- Keyboard letter shown on a button ---------- */
+.btn kbd {
+    font-family: var(--font);
+    font-size: 0.68rem;
+    font-weight: 700;
+    padding: 1px 5px;
+    margin-left: 6px;
+    border-radius: 4px;
+    background: rgba(255, 255, 255, 0.28);
+    color: inherit;
+}
+.btn-outline kbd { background: var(--green-light); }
+
+/* ---------- "Who's working?" card ---------- */
+.name-card {
+    max-width: 440px;
+    margin: 36px auto;
+    text-align: center;
+    background: var(--surface-alt);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    padding: 32px 28px 28px;
+}
+.name-card h2 { font-size: 1.35rem; margin-bottom: 6px; }
+.name-card p { color: var(--text-muted); margin: 0 0 20px; font-size: 0.95rem; }
+.name-card form { display: flex; gap: 10px; }
+.name-card .field { flex: 1; min-width: 0; font-size: 1.05rem; padding: 12px 14px; }
+
+/* ---------- Work area: big card on the left, side panels on the right ---------- */
+.work-area { display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(290px, 1fr); gap: 22px; align-items: start; }
+.hero-card {
+    background: var(--surface-alt);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    padding: 26px 24px 24px;
+    min-height: 380px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    text-align: center;
+}
+.hero-card .hero-label { font-size: 0.85rem; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-muted); }
+.hero-card .hero-number { font-size: 6.5rem; font-weight: 800; line-height: 1; color: var(--text); }
+.hero-card .hero-meta { color: var(--text-muted); font-weight: 600; font-size: 0.95rem; }
+.hero-card .hero-empty { color: var(--text-faint); font-size: 1.05rem; font-weight: 600; margin-bottom: 6px; }
+.hero-card .hero-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 14px; margin-top: 8px; }
+.hero-card .hero-more { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin-top: 4px; }
+.hero-card .hero-note { max-width: 460px; font-size: 0.9rem; color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px 12px; }
+.hero-card .note-form { display: flex; gap: 8px; width: 100%; max-width: 460px; }
+.hero-card .note-form .field { flex: 1; min-width: 0; }
+.btn-big { flex-direction: column; gap: 4px; min-width: 230px; padding: 16px 26px; font-size: 1.15rem; border-radius: var(--radius-md); }
+.btn-big small { font-size: 0.78rem; font-weight: 600; opacity: 0.92; }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+
+.side-panel { background: var(--surface-alt); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 16px 16px 18px; }
+.side-panel + .side-panel { margin-top: 16px; }
+.side-panel h3 { display: flex; align-items: center; gap: 8px; font-size: 1rem; margin-bottom: 12px; }
+.side-panel h3 .count { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-pill); padding: 1px 10px; font-size: 0.85rem; color: var(--text-muted); }
+.side-panel .hint { font-size: 0.8rem; color: var(--text-faint); margin: 10px 0 0; }
+.side-panel .empty-note { padding: 8px 0; text-align: left; }
+.side-panel .inline-row { display: flex; gap: 8px; margin-top: 10px; }
+.side-panel .inline-row .field { flex: 1; min-width: 0; }
+
+.link-button {
+    background: none;
+    border: none;
+    padding: 4px 0;
+    margin-top: 8px;
+    color: var(--green-dark);
+    font-family: var(--font);
+    font-size: 0.85rem;
+    font-weight: 700;
+    cursor: pointer;
+}
+.link-button:hover { text-decoration: underline; }
+
+/* ---------- Ticket bar (ticket station PC only) ---------- */
+.ticket-bar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 14px;
+    background: var(--green-light);
+    border: 1px solid var(--green-ring);
+    border-radius: var(--radius-lg);
+    padding: 12px 16px;
+    margin-bottom: 20px;
+}
+.ticket-bar .btn-ticket { font-size: 1.05rem; padding: 13px 26px; }
+.ticket-bar .next-hint { color: var(--text-muted); font-size: 0.9rem; font-weight: 600; }
+.ticket-bar .next-hint strong { color: var(--text); font-size: 1.15rem; }
+.ticket-bar .reprint-btn { margin-left: auto; }
+
+/* ---------- Number chips (waiting / back from payment / next in line) ---------- */
+.chip-list { display: flex; flex-wrap: wrap; gap: 8px; }
+.chip {
+    display: inline-flex;
+    flex-direction: column;
+    align-items: center;
+    min-width: 62px;
+    padding: 7px 10px;
+    border: 1.5px solid var(--border);
+    border-radius: var(--radius-md);
+    background: var(--surface);
+    color: var(--text);
+    font-family: var(--font);
+    font-size: 1.25rem;
+    font-weight: 800;
+    line-height: 1.1;
+}
+.chip small { margin-top: 2px; font-size: 0.68rem; font-weight: 600; color: var(--text-muted); }
+button.chip { cursor: pointer; transition: border-color .15s ease, box-shadow .15s ease; }
+button.chip:hover { border-color: var(--green); box-shadow: var(--shadow-sm); }
+.chip.pending { background: var(--yellow-light); border-color: rgba(191, 166, 0, 0.3); color: var(--yellow); }
+.chip.priority { background: var(--red-light); border-color: rgba(244, 67, 54, 0.3); color: var(--red); }
+.chip.is-next { border-color: var(--green); box-shadow: 0 0 0 3px var(--green-ring); }
+.chip-list .extra { display: none; }
+.chip-list.show-all .extra { display: inline-flex; }
+
+@media (max-width: 900px) {
+    .app-header { flex-wrap: wrap; }
+    .app-header .app-nav { margin-left: 0; order: 3; width: 100%; }
+    .work-area { grid-template-columns: 1fr; }
+    .hero-card { min-height: 0; }
+    .hero-card .hero-number { font-size: 5rem; }
+    .btn-big { min-width: 0; width: 100%; }
+}

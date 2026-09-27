@@ -1,8 +1,30 @@
 <?php
 require 'config.php';
 require 'queue_functions.php';
+require 'app_header.php';
+
+// Plain words for lab_activity_log.action codes in the activity log. Codes
+// not listed here (e.g. a future action) are shown as-is.
+const ACTION_LABELS = [
+    'issue_ticket' => 'Number issued',
+    'reprint_ticket' => 'Ticket reprinted',
+    'call_for_interview' => 'Called to interview',
+    'complete_interview' => 'Interview done',
+    'confirm_payment' => 'Payment confirmed',
+    'call_for_extraction' => 'Called to extraction',
+    'complete_extraction' => 'Extraction done',
+    'recall' => 'Called again',
+    'no_show' => 'No show',
+    'reinstate' => 'Put back in line',
+    'cancel' => 'Cancelled',
+    'manual_correction' => 'Manual correction',
+];
 
 // ---------- local helpers ----------
+
+function action_label($action) {
+    return ACTION_LABELS[$action] ?? $action;
+}
 
 function fetch_durations($conn, $start_col, $end_col, $start_date, $end_date) {
     // $start_col/$end_col are always one of the fixed literals in $METRICS below,
@@ -61,13 +83,16 @@ $period = isset($_GET['period']) ? $_GET['period'] : 'day';
 $startDateStr = $startDate->format('Y-m-d');
 $endDateStr = $endDate->format('Y-m-d');
 
+$today = date('Y-m-d');
+$is_today_base = $base->format('Y-m-d') === $today;
 if ($period === 'day') {
-    $periodLabel = 'Daily Statistics for ' . htmlspecialchars($startDateStr);
+    $periodLabel = ($startDateStr === $today ? 'Today · ' : '') . $startDate->format('l, M j, Y');
 } elseif ($period === 'week') {
-    $periodLabel = 'Weekly Statistics (' . htmlspecialchars($startDateStr) . ' to ' . htmlspecialchars($endDateStr) . ')';
+    $periodLabel = ($is_today_base ? 'This week · ' : 'Week of ') . $startDate->format('M j') . ' – ' . $endDate->format('M j, Y');
 } else {
-    $periodLabel = 'Monthly Statistics for ' . htmlspecialchars($base->format('F Y'));
+    $periodLabel = ($is_today_base ? 'This month · ' : '') . $base->format('F Y');
 }
+$periodLabel = htmlspecialchars($periodLabel);
 
 // ---------- CSV export (daily_statistics over the selected range, OPD's naming) ----------
 
@@ -130,12 +155,12 @@ foreach ($summary as $k => $v) $summary[$k] = (int) $v;
 // which is the actual bottleneck.
 
 $METRICS = [
-    'wait_to_interview' => ['created_at', 'interview_called_at', 'Wait to Interview'],
-    'interview_duration' => ['interview_called_at', 'interview_completed_at', 'Interview Duration'],
-    'time_away_paying' => ['interview_completed_at', 'payment_confirmed_at', 'Time Away Paying (City Hall)'],
-    'wait_to_extraction' => ['extraction_eligible_at', 'extraction_called_at', 'Wait to Extraction (Lab)'],
-    'extraction_duration' => ['extraction_called_at', 'extraction_completed_at', 'Extraction Duration'],
-    'total_visit_time' => ['created_at', 'extraction_completed_at', 'Total Visit Time'],
+    'wait_to_interview' => ['created_at', 'interview_called_at', 'Wait before interview'],
+    'interview_duration' => ['interview_called_at', 'interview_completed_at', 'Interview'],
+    'time_away_paying' => ['interview_completed_at', 'payment_confirmed_at', 'Away paying at City Hall'],
+    'wait_to_extraction' => ['extraction_eligible_at', 'extraction_called_at', 'Wait for extraction (lab)'],
+    'extraction_duration' => ['extraction_called_at', 'extraction_completed_at', 'Extraction'],
+    'total_visit_time' => ['created_at', 'extraction_completed_at', 'Whole visit'],
 ];
 $timing = [];
 foreach ($METRICS as $key => [$start_col, $end_col, $label]) {
@@ -212,123 +237,132 @@ $stmt->close();
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Laboratory Queueing — Admin Reports</title>
-<link rel="stylesheet" href="assets/theme.css">
+<title>Laboratory Queueing — Reports</title>
+<link rel="stylesheet" href="assets/theme.css?v=<?= filemtime(__DIR__ . '/assets/theme.css') ?>">
 <style>
-    .reports-title { text-align: center; color: var(--green-dark); font-size: 1.6rem; margin-bottom: 24px; }
-    .print-btn-area { display: flex; justify-content: center; align-items: center; gap: 12px; margin-bottom: 24px; flex-wrap: wrap; }
-    .stats-section { margin-top: 28px; padding: 22px; background: var(--surface-alt); border-radius: var(--radius-lg); border: 1px solid var(--border); }
+    .report-toolbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 18px; }
+    .period-picker { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+    .period-picker label { font-size: 0.85rem; font-weight: 600; color: var(--text-muted); margin-left: 6px; }
+    .period-picker .field { padding: 6px 10px; font-size: 0.88rem; }
+    .period-picker .other-periods { font-size: 0.85rem; color: var(--text-muted); }
+    .period-picker .other-periods a { color: var(--green-dark); font-weight: 700; }
+    .report-actions { display: flex; gap: 8px; }
+    .reports-title { text-align: center; color: var(--text); font-size: 1.45rem; margin: 6px 0 4px; }
+    .right-now { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px 22px; color: var(--text-muted); font-size: 0.92rem; font-weight: 600; margin-bottom: 8px; }
+    .right-now strong { color: var(--text); font-size: 1.1rem; }
+    .right-now .right-now-label { text-transform: uppercase; letter-spacing: 0.06em; font-size: 0.78rem; }
+    .stats-section { margin-top: 22px; padding: 22px; background: var(--surface-alt); border-radius: var(--radius-lg); border: 1px solid var(--border); }
     .stats-section h3 { color: var(--green-dark); margin-bottom: 12px; font-size: 1.05rem; }
-    .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; margin-top: 14px; }
+    .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 14px; margin-top: 14px; }
     .mini-stat { background: var(--surface); padding: 16px; border-radius: var(--radius-sm); border: 1px solid var(--border); text-align: center; }
-    .mini-stat h4 { margin: 0 0 8px; color: var(--green-dark); font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.03em; }
+    .mini-stat h4 { margin: 0 0 8px; color: var(--text-muted); font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.03em; }
     .mini-stat .value { font-size: 1.8rem; font-weight: 800; color: var(--text); }
+    .two-col { display: grid; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); gap: 0 22px; }
+    .data-table td.label-cell { text-align: left; }
+    .data-table .sub { display: block; font-size: 0.76rem; color: var(--text-faint); font-weight: 500; }
+    .bar-cell { width: 55%; }
+    .bar { height: 12px; border-radius: var(--radius-pill); background: var(--green); min-width: 3px; }
+    .log-filters summary { cursor: pointer; font-size: 0.85rem; font-weight: 700; color: var(--green-dark); }
 </style>
 </head>
 <body>
-    <div class="app-header">
-        <img src="CHO.png" alt="CHO Logo" class="logo-img">
-        <div class="title">Laboratory Queueing</div>
-        <div class="subtitle">Admin Reports</div>
-    </div>
+    <?php render_app_header('reports'); ?>
     <div class="page page-wide">
-        <h1 class="reports-title">Laboratory Queue Log &amp; Statistics</h1>
-
-        <!-- Live Monitor: read-only, updates from queue_status.php's poll, no reload -->
-        <div class="stats-section no-print">
-            <h3>Live Monitor</h3>
-            <div class="stats-grid">
-                <div class="mini-stat">
-                    <h4>Waiting</h4>
-                    <div class="value" id="liveWaiting">—</div>
-                </div>
-                <div class="mini-stat">
-                    <h4>Interviewing</h4>
-                    <div class="value" id="liveInterviewing">—</div>
-                </div>
-                <div class="mini-stat">
-                    <h4>Awaiting Payment</h4>
-                    <div class="value" id="liveAwaitingPayment">—</div>
-                </div>
-                <div class="mini-stat">
-                    <h4>Ready for Extraction</h4>
-                    <div class="value" id="liveReadyForExtraction">—</div>
-                </div>
+        <div class="report-toolbar no-print">
+            <div class="period-picker">
+                <a class="btn btn-sm <?= $period === 'day' && $startDateStr === $today ? '' : 'btn-outline' ?>" href="?period=day&amp;date=<?= $today ?>">Today</a>
+                <a class="btn btn-sm <?= $period === 'week' && $is_today_base ? '' : 'btn-outline' ?>" href="?period=week&amp;date=<?= $today ?>">This Week</a>
+                <a class="btn btn-sm <?= $period === 'month' && $is_today_base ? '' : 'btn-outline' ?>" href="?period=month&amp;date=<?= $today ?>">This Month</a>
+                <form method="get" id="otherDayForm">
+                    <input type="hidden" name="period" value="day">
+                    <label for="otherDay">Other day</label>
+                    <input class="field" type="date" id="otherDay" name="date" value="<?= htmlspecialchars($base->format('Y-m-d')) ?>" max="<?= $today ?>">
+                </form>
+                <?php if (!$is_today_base): ?>
+                <span class="other-periods">
+                    See the whole
+                    <a href="?period=week&amp;date=<?= htmlspecialchars($base->format('Y-m-d')) ?>">week</a> or
+                    <a href="?period=month&amp;date=<?= htmlspecialchars($base->format('Y-m-d')) ?>">month</a>
+                </span>
+                <?php endif; ?>
+            </div>
+            <div class="report-actions">
+                <form method="post">
+                    <input type="hidden" name="export_date" value="<?= htmlspecialchars($date) ?>">
+                    <input type="hidden" name="export_period" value="<?= htmlspecialchars($period) ?>">
+                    <button type="submit" name="export_csv" class="btn btn-sm">Export CSV</button>
+                </form>
+                <button type="button" class="btn btn-outline btn-sm" onclick="window.print()">Print</button>
             </div>
         </div>
 
-        <form method="get" class="toolbar-form no-print">
-            <label for="date">Base Date</label>
-            <input class="field" type="date" id="date" name="date" value="<?= htmlspecialchars($date) ?>">
-            <label for="period">Period</label>
-            <select class="field" id="period" name="period">
-                <option value="day" <?= $period === 'day' ? 'selected' : '' ?>>Day</option>
-                <option value="week" <?= $period === 'week' ? 'selected' : '' ?>>Week</option>
-                <option value="month" <?= $period === 'month' ? 'selected' : '' ?>>Month</option>
-            </select>
-            <button type="submit" class="btn">Filter</button>
-        </form>
-        <div class="print-btn-area no-print">
-            <button class="btn btn-outline" onclick="window.print()">Print / Save as PDF</button>
-            <button class="btn btn-outline" type="button" onclick="toggleDetails()">Show/Hide Activity Log</button>
-            <form method="post" style="display:inline;">
-                <input type="hidden" name="export_date" value="<?= htmlspecialchars($date) ?>">
-                <input type="hidden" name="export_period" value="<?= htmlspecialchars($period) ?>">
-                <button type="submit" name="export_csv" class="btn">Export to CSV</button>
-            </form>
+        <!-- Right now: read-only, updates from queue_status.php's poll, no reload -->
+        <div class="right-now no-print">
+            <span class="right-now-label">Right now</span>
+            <span>Waiting <strong id="liveWaiting">—</strong></span>
+            <span>Interviewing <strong id="liveInterviewing">—</strong></span>
+            <span>Back from payment <strong id="liveAwaitingPayment">—</strong></span>
+            <span>Ready for extraction <strong id="liveReadyForExtraction">—</strong></span>
         </div>
 
+        <h1 class="reports-title"><?= $periodLabel ?></h1>
+
         <div class="stats-section">
-            <h3><?= $periodLabel ?></h3>
-            <div class="stats-grid">
-                <div class="mini-stat"><h4>Numbers Issued</h4><div class="value"><?= $summary['issued'] ?></div></div>
+            <div class="stats-grid" style="margin-top:0;">
+                <div class="mini-stat"><h4>Tickets issued</h4><div class="value"><?= $summary['issued'] ?></div></div>
                 <div class="mini-stat"><h4>Completed</h4><div class="value"><?= $summary['completed'] ?></div></div>
-                <div class="mini-stat"><h4>No-Show</h4><div class="value"><?= $summary['no_show'] ?></div></div>
+                <div class="mini-stat"><h4>No-show</h4><div class="value"><?= $summary['no_show'] ?></div></div>
                 <div class="mini-stat"><h4>Cancelled</h4><div class="value"><?= $summary['cancelled'] ?></div></div>
-                <div class="mini-stat"><h4>For-Payment</h4><div class="value"><?= $summary['for_payment'] ?></div></div>
-                <div class="mini-stat"><h4>No-Charge</h4><div class="value"><?= $summary['no_charge'] ?></div></div>
+                <div class="mini-stat"><h4>Paid</h4><div class="value"><?= $summary['for_payment'] ?></div></div>
+                <div class="mini-stat"><h4>No charge</h4><div class="value"><?= $summary['no_charge'] ?></div></div>
+            </div>
+        </div>
+
+        <div class="two-col">
+            <div class="stats-section">
+                <h3>Average Times</h3>
+                <table class="data-table" style="margin-top:14px;">
+                    <tr><th style="text-align:left;">Step</th><th>Average</th></tr>
+                    <?php foreach ($timing as $row): ?>
+                    <tr>
+                        <td class="label-cell"><?= htmlspecialchars($row['label']) ?></td>
+                        <td>
+                            <?= format_duration_seconds($row['avg']) ?>
+                            <?php if ($row['n'] > 0): ?>
+                            <span class="sub">median <?= format_duration_seconds($row['median']) ?> · <?= $row['n'] ?> patient<?= $row['n'] === 1 ? '' : 's' ?></span>
+                            <?php endif; ?>
+                        </td>
+                    </tr>
+                    <?php endforeach; ?>
+                </table>
+            </div>
+
+            <div class="stats-section">
+                <h3>Busiest Hours</h3>
+                <?php if (empty($hourly_volume)): ?>
+                <p style="text-align:center; color:var(--text-faint);">No numbers issued in this range.</p>
+                <?php else: $max_hourly = max(array_map(function ($r) { return (int) $r['cnt']; }, $hourly_volume)); ?>
+                <table class="data-table" style="margin-top:14px;">
+                    <tr><th>Hour</th><th>Tickets</th><th class="bar-cell"></th></tr>
+                    <?php foreach ($hourly_volume as $row): ?>
+                    <tr>
+                        <td><?= date('g A', mktime((int) $row['hr'], 0, 0)) ?></td>
+                        <td><?= (int) $row['cnt'] ?></td>
+                        <td class="bar-cell"><div class="bar" style="width:<?= $max_hourly > 0 ? round((int) $row['cnt'] / $max_hourly * 100) : 0 ?>%;"></div></td>
+                    </tr>
+                    <?php endforeach; ?>
+                </table>
+                <?php endif; ?>
             </div>
         </div>
 
         <div class="stats-section">
-            <h3>Timing Metrics</h3>
-            <table class="data-table" style="margin-top:14px;">
-                <tr><th>Metric</th><th>Average</th><th>Median</th><th>Sample Size</th></tr>
-                <?php foreach ($timing as $row): ?>
-                <tr>
-                    <td><?= htmlspecialchars($row['label']) ?></td>
-                    <td><?= format_duration_seconds($row['avg']) ?></td>
-                    <td><?= format_duration_seconds($row['median']) ?></td>
-                    <td><?= $row['n'] ?></td>
-                </tr>
-                <?php endforeach; ?>
-            </table>
-        </div>
-
-        <div class="stats-section">
-            <h3>Hourly Volume (by time issued)</h3>
-            <?php if (empty($hourly_volume)): ?>
-            <p style="text-align:center; color:var(--text-faint);">No numbers issued in this range.</p>
-            <?php else: ?>
-            <table class="data-table" style="margin-top:14px;">
-                <tr><th>Hour</th><th>Numbers Issued</th></tr>
-                <?php foreach ($hourly_volume as $row): ?>
-                <tr>
-                    <td><?= date('g A', mktime((int) $row['hr'], 0, 0)) ?></td>
-                    <td><?= (int) $row['cnt'] ?></td>
-                </tr>
-                <?php endforeach; ?>
-            </table>
-            <?php endif; ?>
-        </div>
-
-        <div class="stats-section">
-            <h3>Throughput per Staff</h3>
+            <h3>Patients Served by Staff (extraction)</h3>
             <?php if (empty($staff_throughput)): ?>
             <p style="text-align:center; color:var(--text-faint);">No completed extractions in this range.</p>
             <?php else: ?>
             <table class="data-table" style="margin-top:14px;">
-                <tr><th>Staff</th><th>Served</th><th>No Charge</th><th>For Payment</th><th>No Show</th></tr>
+                <tr><th>Staff</th><th>Served</th><th>No Charge</th><th>Paid</th><th>No Show</th></tr>
                 <?php foreach ($staff_throughput as $row): ?>
                 <tr>
                     <td><?= htmlspecialchars($row['staff_name']) ?></td>
@@ -342,10 +376,19 @@ $stmt->close();
             <?php endif; ?>
         </div>
 
-        <div id="detailed-report" style="display:none; margin-top:22px;">
+        <?php
+        // Keep the log open after a log search; open "More filters" only when
+        // the From/To dates were actually changed from the report period.
+        $log_filtered = $log_number !== null || $log_staff !== '' || $log_action !== '' || isset($_GET['log_start']);
+        $custom_log_range = $log_start !== $startDateStr || $log_end !== $endDateStr;
+        ?>
+        <div style="text-align:center; margin-top:22px;" class="no-print">
+            <button class="btn btn-outline" type="button" id="logToggle" onclick="toggleDetails()"><?= $log_filtered ? 'Hide activity log' : 'Show activity log' ?></button>
+        </div>
+        <div id="detailed-report" style="display:<?= $log_filtered ? 'block' : 'none' ?>; margin-top:12px;">
             <div class="stats-section">
                 <h3>Activity Log</h3>
-                <form method="get" class="toolbar-form no-print">
+                <form method="get" class="toolbar-form no-print" style="margin-bottom:0;">
                     <input type="hidden" name="date" value="<?= htmlspecialchars($date) ?>">
                     <input type="hidden" name="period" value="<?= htmlspecialchars($period) ?>">
                     <label for="log_number">Number</label>
@@ -356,30 +399,32 @@ $stmt->close();
                     <select class="field" id="log_action" name="log_action">
                         <option value="">All</option>
                         <?php foreach ($known_actions as $a): ?>
-                        <option value="<?= htmlspecialchars($a) ?>" <?= $log_action === $a ? 'selected' : '' ?>><?= htmlspecialchars($a) ?></option>
+                        <option value="<?= htmlspecialchars($a) ?>" <?= $log_action === $a ? 'selected' : '' ?>><?= htmlspecialchars(action_label($a)) ?></option>
                         <?php endforeach; ?>
                     </select>
-                    <label for="log_start">From</label>
-                    <input class="field" type="date" id="log_start" name="log_start" value="<?= htmlspecialchars($log_start) ?>">
-                    <label for="log_end">To</label>
-                    <input class="field" type="date" id="log_end" name="log_end" value="<?= htmlspecialchars($log_end) ?>">
-                    <button type="submit" class="btn">Filter Log</button>
+                    <button type="submit" class="btn">Search Log</button>
+                    <details class="log-filters" <?= $custom_log_range ? 'open' : '' ?>>
+                        <summary>More filters</summary>
+                        <label for="log_start">From</label>
+                        <input class="field" type="date" id="log_start" name="log_start" value="<?= htmlspecialchars($log_start) ?>">
+                        <label for="log_end">To</label>
+                        <input class="field" type="date" id="log_end" name="log_end" value="<?= htmlspecialchars($log_end) ?>">
+                    </details>
                 </form>
                 <table class="data-table" style="margin-top:14px;">
-                    <tr><th>Time</th><th>Staff</th><th>Station</th><th>Number</th><th>Action</th></tr>
+                    <tr><th>Time</th><th>Staff</th><th>Number</th><th>What happened</th></tr>
                     <?php if (count($activity_rows) > 0): ?>
                         <?php foreach ($activity_rows as $row): ?>
                         <tr>
-                            <td><?= htmlspecialchars($row['log_time']) ?></td>
+                            <td><?= htmlspecialchars(date('M j, g:i:s A', strtotime($row['log_time']))) ?></td>
                             <td><?= htmlspecialchars($row['staff_name']) ?></td>
-                            <td><?= htmlspecialchars($row['station']) ?></td>
                             <td><?= htmlspecialchars($row['queue_number']) ?></td>
-                            <td><?= htmlspecialchars($row['action']) ?></td>
+                            <td><?= htmlspecialchars(action_label($row['action'])) ?></td>
                         </tr>
                         <?php endforeach; ?>
-                        <tr class="total-row"><td colspan="5">Showing <?= count($activity_rows) ?> row(s) (capped at 500)</td></tr>
+                        <tr class="total-row"><td colspan="4">Showing <?= count($activity_rows) ?> row(s) (capped at 500)</td></tr>
                     <?php else: ?>
-                        <tr><td colspan="5" class="no-logs">No activity found for this filter.</td></tr>
+                        <tr><td colspan="4" class="no-logs">No activity found for this filter.</td></tr>
                     <?php endif; ?>
                 </table>
             </div>
@@ -389,10 +434,17 @@ $stmt->close();
     <script>
     function toggleDetails() {
         var el = document.getElementById('detailed-report');
-        el.style.display = (el.style.display === 'none' || el.style.display === '') ? 'block' : 'none';
+        var open = el.style.display === 'none' || el.style.display === '';
+        el.style.display = open ? 'block' : 'none';
+        document.getElementById('logToggle').textContent = open ? 'Hide activity log' : 'Show activity log';
     }
 
-    // Live Monitor: updates in place from the same poll every other screen uses,
+    // "Other day" applies as soon as a date is picked — no Filter button.
+    document.getElementById('otherDay').addEventListener('change', function() {
+        if (this.value) this.form.submit();
+    });
+
+    // Right now: updates in place from the same poll every other screen uses,
     // never reloads the admin page out from under a report someone is reading.
     async function pollLiveMonitor() {
         try {
