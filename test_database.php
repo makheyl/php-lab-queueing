@@ -9,7 +9,7 @@ require 'config.php';
 echo "Testing database setup...\n\n";
 
 // Test 1: Check if tables exist
-$tables = ['queue', 'lab_activity_log', 'daily_statistics', 'historical_data', 'settings'];
+$tables = ['queue', 'lab_activity_log', 'daily_statistics', 'historical_data', 'claimable_results', 'settings'];
 $all_tables_exist = true;
 
 foreach ($tables as $table) {
@@ -72,6 +72,22 @@ foreach ($expected_settings as $key => $expected_value) {
     } else {
         $actual = array_key_exists($key, $actual_settings) ? $actual_settings[$key] : '(missing)';
         echo "✗ Setting '$key' expected '$expected_value', got '$actual'\n";
+        $all_settings_ok = false;
+    }
+}
+
+// Ticket printer settings are edited on printer_setup.php, so only check that
+// each key exists — comparing against the seed values would fail as soon as
+// the clinic customizes its ticket.
+$expected_setting_keys = [
+    'ticket_printing_enabled', 'ticket_header', 'ticket_subheader', 'ticket_footer',
+    'ticket_show_logo', 'ticket_show_waiting', 'ticket_width_mm',
+];
+foreach ($expected_setting_keys as $key) {
+    if (array_key_exists($key, $actual_settings)) {
+        echo "✓ Setting '$key' exists\n";
+    } else {
+        echo "✗ Setting '$key' is missing\n";
         $all_settings_ok = false;
     }
 }

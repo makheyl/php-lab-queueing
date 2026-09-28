@@ -25,6 +25,19 @@ function get_setting($conn, $key, $default = null) {
 }
 
 /**
+ * Creates or overwrites a single settings row. Used by printer_setup.php —
+ * the only screen that edits settings from the UI.
+ */
+function set_setting($conn, $key, $value) {
+    $stmt = $conn->prepare(
+        "INSERT INTO settings (`key`, `value`) VALUES (?, ?) ON DUPLICATE KEY UPDATE `value` = VALUES(`value`)"
+    );
+    $stmt->bind_param('ss', $key, $value);
+    $stmt->execute();
+    $stmt->close();
+}
+
+/**
  * Today's service_date — but the day rolls over at settings.daily_reset_hour
  * instead of midnight, so a 6am lab opening (and anything logged before the
  * next day's reset hour) still counts as "today". Asia/Manila per config.php.
@@ -40,8 +53,9 @@ function service_date_now($conn) {
 
 /**
  * Writes one row to lab_activity_log. Called on every staff-driven state
- * change (add_to_queue is data entry with no staff_name to attribute, so it
- * does not log).
+ * change, including issue_next_number() ('issue_ticket') and ticket reprints
+ * ('reprint_ticket'). add_to_queue() is raw data entry with no staff_name to
+ * attribute, so it does not log.
  */
 function log_activity($conn, $staff_name, $station, $queue_number, $action) {
     $stmt = $conn->prepare(
@@ -50,6 +64,51 @@ function log_activity($conn, $staff_name, $station, $queue_number, $action) {
     $stmt->bind_param('siis', $staff_name, $station, $queue_number, $action);
     $stmt->execute();
     $stmt->close();
+}
+
+/**
+ * Queues a voice announcement for display.php ("Number 12, please proceed
+ * to window 1"). notify.json keeps the last ANNOUNCE_KEEP calls as a list
+ * instead of a single slot, so calls made seconds apart are all announced in
+ * order, and every open display board hears every call (boards track the
+ * newest id they've spoken; nothing deletes entries). Locked, so two calls in
+ * the same instant can't overwrite each other.
+ *
+ * $type is 'interview' or 'extraction'; $station is the interview window.
+ */
+const ANNOUNCE_KEEP = 20;
+
+function announce_call($queue_number, $type, $station = null) {
+    $fp = fopen(__DIR__ . '/notify.json', 'c+');
+    if (!$fp) {
+        error_log('announce_call: could not open notify.json');
+        return false;
+    }
+    flock($fp, LOCK_EX);
+    $data = json_decode(stream_get_contents($fp), true);
+    $calls = (is_array($data) && isset($data['calls']) && is_array($data['calls'])) ? $data['calls'] : [];
+
+    // Ids must strictly increase — boards speak every id newer than the last one they spoke.
+    $id = microtime(true);
+    $last = end($calls);
+    if ($last && isset($last['id']) && (float) $last['id'] >= $id) {
+        $id = (float) $last['id'] + 0.001;
+    }
+    $calls[] = [
+        'id' => $id,
+        'queue_number' => (int) $queue_number,
+        'type' => $type,
+        'station' => $station,
+    ];
+    $calls = array_slice($calls, -ANNOUNCE_KEEP);
+
+    ftruncate($fp, 0);
+    rewind($fp);
+    fwrite($fp, json_encode(['calls' => $calls]));
+    fflush($fp);
+    flock($fp, LOCK_UN);
+    fclose($fp);
+    return true;
 }
 
 /**
@@ -77,10 +136,12 @@ function add_to_queue($conn, $queue_number) {
 }
 
 /**
- * max(queue_number) + 1 for today, for the encoder's convenience.
+ * max(queue_number) + 1 for the given service_date (default: today). Shown as
+ * the "Next: N" hint on the encoder console, and the number
+ * issue_next_number() tries to claim.
  */
-function next_suggested_number($conn) {
-    $service_date = service_date_now($conn);
+function next_suggested_number($conn, $service_date = null) {
+    $service_date = $service_date ?: service_date_now($conn);
     $stmt = $conn->prepare(
         "SELECT COALESCE(MAX(queue_number), 0) + 1 AS next_number FROM queue WHERE service_date = ?"
     );
@@ -89,6 +150,80 @@ function next_suggested_number($conn) {
     $row = $stmt->get_result()->fetch_assoc();
     $stmt->close();
     return (int) $row['next_number'];
+}
+
+/**
+ * Issues the next queue_number for today (max + 1) as a new 'waiting' ticket —
+ * this is what the encoder's PRINT NEXT NUMBER button calls, replacing typed
+ * numbers. The number lives in the database, not in the printer, so a printed
+ * ticket always matches what display.php shows and announces.
+ *
+ * Two issuers computing max + 1 at the same instant would pick the same
+ * number: the UNIQUE (service_date, queue_number) key rejects the loser with
+ * 1062 and it recomputes and retries. Every round has at least one winner, so
+ * 10 attempts is enough for up to 10 simultaneous issuers (production has one
+ * ticket station; test_queue_logic.php races 10 processes against this).
+ *
+ * Returns the inserted row, or null if every attempt lost the race.
+ */
+function issue_next_number($conn, $staff_name, $station) {
+    $service_date = service_date_now($conn);
+
+    for ($attempt = 0; $attempt < 10; $attempt++) {
+        $queue_number = next_suggested_number($conn, $service_date);
+        $stmt = $conn->prepare(
+            "INSERT INTO queue (service_date, queue_number, status) VALUES (?, ?, 'waiting')"
+        );
+        $stmt->bind_param('si', $service_date, $queue_number);
+        try {
+            $stmt->execute();
+            $id = $conn->insert_id;
+            $stmt->close();
+        } catch (mysqli_sql_exception $e) {
+            $stmt->close();
+            if ($e->getCode() === 1062) {
+                continue; // another issuer took this number first — recompute and retry
+            }
+            throw $e;
+        }
+
+        log_activity($conn, $staff_name, $station, $queue_number, 'issue_ticket');
+        return find_queue_row($conn, $id);
+    }
+    return null;
+}
+
+/**
+ * Today's most recently issued ticket (highest queue_number), for the
+ * encoder console's "Reprint Last" button. Null before the first ticket.
+ */
+function get_last_issued($conn, $service_date = null) {
+    $service_date = $service_date ?: service_date_now($conn);
+    $stmt = $conn->prepare(
+        "SELECT * FROM queue WHERE service_date = ? ORDER BY queue_number DESC LIMIT 1"
+    );
+    $stmt->bind_param('s', $service_date);
+    $stmt->execute();
+    $row = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+    return $row ?: null;
+}
+
+/**
+ * How many tickets are still waiting for interview ahead of this one (lower
+ * queue_number, same service_date). Printed on the ticket.
+ */
+function count_waiting_ahead($conn, $row) {
+    $stmt = $conn->prepare(
+        "SELECT COUNT(*) AS cnt FROM queue WHERE service_date = ? AND status = 'waiting' AND queue_number < ?"
+    );
+    $service_date = $row['service_date'];
+    $queue_number = (int) $row['queue_number'];
+    $stmt->bind_param('si', $service_date, $queue_number);
+    $stmt->execute();
+    $result = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+    return (int) $result['cnt'];
 }
 
 /**
@@ -196,7 +331,8 @@ function complete_interview($conn, $id, $payment_required, $staff_name) {
 /**
  * Looks up today's queue_number and reports whether it can be confirmed for
  * payment. Reason is one of:
- *   'not_found', 'wrong_day', 'not_yet_interviewed', 'no_charge', 'already_confirmed'
+ *   'not_found', 'wrong_day', 'not_yet_interviewed', 'no_show', 'cancelled',
+ *   'no_charge', 'already_confirmed'
  * or null when confirmable. The returned row (when non-null) carries
  * payment_confirmed_at/payment_confirmed_by so the UI can show them for the
  * 'already_confirmed' case.
@@ -218,6 +354,11 @@ function find_for_payment($conn, $queue_number) {
     }
     if (in_array($row['status'], ['waiting', 'interviewing'], true)) {
         return [$row, false, 'not_yet_interviewed'];
+    }
+    // Checked before payment_required: a ticket closed at interview has
+    // payment_required = NULL and would otherwise read as "no charge".
+    if (in_array($row['status'], ['no_show', 'cancelled'], true)) {
+        return [$row, false, $row['status']];
     }
     if (!$row['payment_required']) {
         return [$row, false, 'no_charge'];
@@ -471,6 +612,24 @@ function get_awaiting_payment($conn, $service_date = null) {
     $rows = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
     $stmt->close();
     return $rows;
+}
+
+/**
+ * Names staff have used in the last 30 days, most recent first — suggestions
+ * for the "Who's working?" card, so staff pick their name instead of
+ * retyping it every shift.
+ */
+function get_recent_staff_names($conn, $limit = 20) {
+    $stmt = $conn->prepare(
+        "SELECT staff_name FROM lab_activity_log
+         WHERE staff_name <> '' AND log_time >= NOW() - INTERVAL 30 DAY
+         GROUP BY staff_name ORDER BY MAX(log_time) DESC LIMIT ?"
+    );
+    $stmt->bind_param('i', $limit);
+    $stmt->execute();
+    $names = array_column($stmt->get_result()->fetch_all(MYSQLI_ASSOC), 'staff_name');
+    $stmt->close();
+    return $names;
 }
 
 /**

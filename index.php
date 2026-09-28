@@ -2,25 +2,28 @@
 session_start();
 require 'config.php';
 require 'queue_functions.php';
+require 'app_header.php';
+
+// There is only one interview window in this lab, so staff never pick or type
+// a window number. Kept as a constant (not a UI value) because
+// queue.interview_station and the display board's "Window N" still use it —
+// if a second window is ever added, this is the one place to change (plus a
+// window picker on the name card). Same approach as extraction.php's
+// EXTRACTION_STATION.
+const INTERVIEW_WINDOW = 1;
+
+// Waiting numbers shown before "+N more".
+const WAITING_VISIBLE_LIMIT = 12;
 
 // ---------- small local helpers (index.php-only, not shared queue logic) ----------
 
-function redirect_url($encoder_name, $interview_station) {
-    return $_SERVER['PHP_SELF'] . '?encoder_name=' . urlencode($encoder_name) . '&interview_station=' . urlencode((string) $interview_station);
+function redirect_url($encoder_name) {
+    return $_SERVER['PHP_SELF'] . '?encoder_name=' . urlencode($encoder_name);
 }
 
 function elapsed_minutes($datetime) {
     if (!$datetime) return null;
     return (int) floor((time() - strtotime($datetime)) / 60);
-}
-
-function count_status($conn, $service_date, $status) {
-    $stmt = $conn->prepare("SELECT COUNT(*) AS cnt FROM queue WHERE service_date = ? AND status = ?");
-    $stmt->bind_param('ss', $service_date, $status);
-    $stmt->execute();
-    $row = $stmt->get_result()->fetch_assoc();
-    $stmt->close();
-    return (int) $row['cnt'];
 }
 
 function ordinal($n) {
@@ -69,6 +72,10 @@ function payment_reason_message($conn, $service_date, $reason, $row, $queue_numb
             return "Number $queue_number is from " . date('M j', strtotime($row['service_date'])) . ", not today.";
         case 'not_yet_interviewed':
             return "Number $queue_number has not been interviewed yet.";
+        case 'no_show':
+            return "Number $queue_number was marked No Show.";
+        case 'cancelled':
+            return "Number $queue_number was cancelled.";
         case 'no_charge':
             return "Number $queue_number was marked NO CHARGE and is already queued for extraction.";
         case 'already_confirmed':
@@ -104,21 +111,22 @@ function build_payment_search_result($conn, $service_date, $queue_number) {
     ];
 }
 
-// ---------- encoder identity: mirrors doctor.php's doctor_name/table_number pattern ----------
+// ---------- encoder identity: just a name (one interview window) ----------
 
 $encoder_name = '';
-$interview_station = 0;
 if (isset($_GET['encoder_name'])) {
     $encoder_name = trim($_GET['encoder_name']);
-    $interview_station = isset($_GET['interview_station']) ? (int) $_GET['interview_station'] : 0;
     $_SESSION['encoder_name'] = $encoder_name;
-    $_SESSION['interview_station'] = $interview_station;
 } elseif (isset($_SESSION['encoder_name'])) {
     $encoder_name = $_SESSION['encoder_name'];
-    $interview_station = isset($_SESSION['interview_station']) ? (int) $_SESSION['interview_station'] : 0;
 }
 
-// ---------- AJAX endpoints for the Payment Confirmation panel (same inline-AJAX ----------
+// Only the browser marked as the ticket station on printer_setup.php (the PC
+// the XP-80T is plugged into) may issue/print tickets — a click anywhere else
+// would send the ticket to that PC's own default printer.
+$is_ticket_station = ($_COOKIE['lab_ticket_station'] ?? '') === '1';
+
+// ---------- AJAX endpoints for Back from Payment (same inline-AJAX ----------
 // ---------- pattern OPD uses for its field updates: X-Requested-With + JSON) ----------
 
 if (!empty($_SERVER['HTTP_X_REQUESTED_WITH']) && isset($_POST['payment_search'])) {
@@ -141,10 +149,10 @@ if (!empty($_SERVER['HTTP_X_REQUESTED_WITH']) && isset($_POST['payment_confirm']
     $ok = confirm_payment($conn, $id, $staff, $payment_reference);
     if ($ok) {
         $position = extraction_position($conn, $service_date, $id);
-        echo json_encode([
-            'ok' => true,
-            'message' => "Number $queue_number confirmed. Now " . ordinal($position ?? 1) . " in the extraction queue.",
-        ]);
+        $message = "Number $queue_number confirmed. Now " . ordinal($position ?? 1) . " in line for extraction.";
+        // The page reloads after a confirm; the flash carries the message across.
+        $_SESSION['flash_success'] = $message;
+        echo json_encode(['ok' => true, 'message' => $message]);
     } else {
         // Guarded UPDATE affected 0 rows — a double-click, or someone else already
         // confirmed it. Re-read and report the real state, not a generic error.
@@ -154,136 +162,115 @@ if (!empty($_SERVER['HTTP_X_REQUESTED_WITH']) && isset($_POST['payment_confirm']
     exit();
 }
 
-// Ready for Claiming panel: same inline-AJAX pattern as the two handlers
-// above, chosen specifically so adding/claiming a name never reloads the
-// page — a full-page-reload here would reset scroll position, which is the
-// actual problem this was built to avoid.
-if (!empty($_SERVER['HTTP_X_REQUESTED_WITH']) && isset($_POST['add_claimable'])) {
+// Ticket printing: PRINT NEXT NUMBER and Reprint. JSON rather than
+// POST-Redirect-GET so the browser can print the ticket (printTicket() below)
+// right after the number is issued, then reload. The reload shows the flash
+// message set here.
+if (!empty($_SERVER['HTTP_X_REQUESTED_WITH']) && isset($_POST['issue_ticket'])) {
     header('Content-Type: application/json');
-    $post_encoder = trim($_POST['encoder_name'] ?? '');
-    $surname = trim($_POST['surname'] ?? '');
-    $first_name_initials = trim($_POST['first_name_initials'] ?? '');
-    if ($surname === '' || $first_name_initials === '') {
-        echo json_encode(['ok' => false, 'error' => 'Surname and first name initials are required.']);
+    if (!$is_ticket_station) {
+        echo json_encode(['ok' => false, 'error' => 'This PC is not set up as the ticket station (see Printer Setup).']);
         exit();
     }
-    $id = add_claimable_result($conn, $surname, $first_name_initials, $post_encoder);
-    echo json_encode([
-        'ok' => true,
-        'row' => ['id' => $id, 'surname' => $surname, 'first_name_initials' => $first_name_initials],
-    ]);
+    $post_encoder = trim($_POST['encoder_name'] ?? '');
+    $ticket = issue_next_number($conn, $post_encoder, INTERVIEW_WINDOW);
+    if (!$ticket) {
+        echo json_encode(['ok' => false, 'error' => 'Could not issue a number. Please try again.']);
+        exit();
+    }
+    $queue_number = (int) $ticket['queue_number'];
+    $print = get_setting($conn, 'ticket_printing_enabled', '1') === '1';
+    if ($print) {
+        $_SESSION['flash_success'] = "Ticket #$queue_number is printing";
+    } else {
+        $_SESSION['flash_notice'] = "Number $queue_number issued. Ticket printing is OFF, so write the number on a slip for the patient.";
+    }
+    echo json_encode(['ok' => true, 'error' => '', 'id' => (int) $ticket['id'], 'queue_number' => $queue_number, 'print' => $print]);
     exit();
 }
 
-if (!empty($_SERVER['HTTP_X_REQUESTED_WITH']) && isset($_POST['mark_claimed'])) {
+if (!empty($_SERVER['HTTP_X_REQUESTED_WITH']) && isset($_POST['reprint_ticket'])) {
     header('Content-Type: application/json');
-    $id = (int) ($_POST['id'] ?? 0);
+    if (!$is_ticket_station) {
+        echo json_encode(['ok' => false, 'error' => 'This PC is not set up as the ticket station (see Printer Setup).']);
+        exit();
+    }
+    if (get_setting($conn, 'ticket_printing_enabled', '1') !== '1') {
+        echo json_encode(['ok' => false, 'error' => 'Ticket printing is OFF (see Printer Setup).']);
+        exit();
+    }
     $post_encoder = trim($_POST['encoder_name'] ?? '');
-    $ok = mark_result_claimed($conn, $id, $post_encoder);
-    echo json_encode(['ok' => $ok]);
+    $ticket = find_queue_row($conn, (int) ($_POST['id'] ?? 0));
+    if (!$ticket || $ticket['service_date'] !== service_date_now($conn)) {
+        echo json_encode(['ok' => false, 'error' => 'Only tickets issued today can be reprinted.']);
+        exit();
+    }
+    $queue_number = (int) $ticket['queue_number'];
+    log_activity($conn, $post_encoder, INTERVIEW_WINDOW, $queue_number, 'reprint_ticket');
+    $_SESSION['flash_success'] = "Ticket #$queue_number reprinted";
+    echo json_encode(['ok' => true, 'error' => '', 'id' => (int) $ticket['id'], 'queue_number' => $queue_number]);
     exit();
 }
 
 // ---------- POST handlers (POST-Redirect-GET per CLAUDE.md §4) ----------
 
-$error_message = '';
-
-if (isset($_POST['add'])) {
-    $queue_number = (int) $_POST['queue_number'];
-    if ($queue_number <= 0) {
-        $error_message = 'Queue number must be a positive integer!';
-    } else {
-        [$ok, $err] = add_to_queue($conn, $queue_number);
-        if (!$ok) {
-            $error_message = $err;
-        } else {
-            header('Location: ' . redirect_url($encoder_name, $interview_station));
-            exit();
-        }
-    }
-}
-
 if (isset($_POST['call_next'])) {
     $post_encoder = trim($_POST['encoder_name']);
-    $post_station = (int) $_POST['interview_station'];
-    $ticket = call_next_interview($conn, $post_station, $post_encoder);
+    $ticket = call_next_interview($conn, INTERVIEW_WINDOW, $post_encoder);
     if ($ticket) {
-        // display.php builds the spoken sentence from type + station — see extraction.php
-        // for the 'extraction' counterpart of this payload shape.
-        file_put_contents('notify.json', json_encode([
-            'queue_number' => $ticket['queue_number'],
-            'type' => 'interview',
-            'station' => $post_station,
-            'timestamp' => microtime(true),
-        ]));
+        // display.php builds the spoken sentence from type + station.
+        announce_call($ticket['queue_number'], 'interview', INTERVIEW_WINDOW);
     } else {
-        // Nothing waiting (or another station's request won the claim race) — flash a
-        // one-shot notice so the encoder can tell "nobody's waiting" apart from "it's
-        // broken," instead of landing back on a page where Add to Queue is the only
-        // thing visibly left to do.
+        // Nothing waiting (or another request won the claim race) — flash a one-shot
+        // notice so the encoder can tell "nobody's waiting" apart from "it's broken".
         $_SESSION['flash_notice'] = 'No one is waiting to be called.';
     }
-    header('Location: ' . redirect_url($post_encoder, $post_station));
+    header('Location: ' . redirect_url($post_encoder));
     exit();
 }
 
 if (isset($_POST['for_payment'])) {
-    $id = (int) $_POST['id'];
     $post_encoder = trim($_POST['encoder_name']);
-    $post_station = (int) $_POST['interview_station'];
-    complete_interview($conn, $id, true, $post_encoder);
-    header('Location: ' . redirect_url($post_encoder, $post_station));
+    complete_interview($conn, (int) $_POST['id'], true, $post_encoder);
+    header('Location: ' . redirect_url($post_encoder));
     exit();
 }
 
 if (isset($_POST['no_charge'])) {
-    $id = (int) $_POST['id'];
     $post_encoder = trim($_POST['encoder_name']);
-    $post_station = (int) $_POST['interview_station'];
-    complete_interview($conn, $id, false, $post_encoder);
-    header('Location: ' . redirect_url($post_encoder, $post_station));
+    complete_interview($conn, (int) $_POST['id'], false, $post_encoder);
+    header('Location: ' . redirect_url($post_encoder));
     exit();
 }
 
 if (isset($_POST['recall'])) {
     $id = (int) $_POST['id'];
     $post_encoder = trim($_POST['encoder_name']);
-    $post_station = (int) $_POST['interview_station'];
     $ticket = find_queue_row($conn, $id);
     $ok = recall($conn, $id, $post_encoder);
     if ($ok && $ticket) {
-        // Same notify.json shape as call_next above — see extraction.php's
-        // recall handler for the 'extraction' counterpart of this payload shape.
-        file_put_contents('notify.json', json_encode([
-            'queue_number' => $ticket['queue_number'],
-            'type' => 'interview',
-            'station' => $post_station,
-            'timestamp' => microtime(true),
-        ]));
+        announce_call($ticket['queue_number'], 'interview', INTERVIEW_WINDOW);
     }
-    header('Location: ' . redirect_url($post_encoder, $post_station));
+    header('Location: ' . redirect_url($post_encoder));
     exit();
 }
 
 if (isset($_POST['no_show'])) {
-    $id = (int) $_POST['id'];
     $post_encoder = trim($_POST['encoder_name']);
-    $post_station = (int) $_POST['interview_station'];
-    mark_no_show($conn, $id, $post_encoder);
-    header('Location: ' . redirect_url($post_encoder, $post_station));
+    mark_no_show($conn, (int) $_POST['id'], $post_encoder);
+    header('Location: ' . redirect_url($post_encoder));
     exit();
 }
 
 if (isset($_POST['save_notes'])) {
     $id = (int) $_POST['id'];
     $post_encoder = trim($_POST['encoder_name']);
-    $post_station = (int) $_POST['interview_station'];
     $notes = trim($_POST['notes'] ?? '');
     $stmt = $conn->prepare("UPDATE queue SET notes = ? WHERE id = ?");
     $stmt->bind_param('si', $notes, $id);
     $stmt->execute();
     $stmt->close();
-    header('Location: ' . redirect_url($post_encoder, $post_station));
+    header('Location: ' . redirect_url($post_encoder));
     exit();
 }
 
@@ -294,523 +281,516 @@ if (isset($_SESSION['flash_notice'])) {
     $notice_message = $_SESSION['flash_notice'];
     unset($_SESSION['flash_notice']);
 }
+$success_message = '';
+if (isset($_SESSION['flash_success'])) {
+    $success_message = $_SESSION['flash_success'];
+    unset($_SESSION['flash_success']);
+}
 
-$has_identity = $encoder_name !== '' && $interview_station > 0;
+$has_identity = $encoder_name !== '';
+$show_name_card = !$has_identity || isset($_GET['change']);
 $service_date = service_date_now($conn);
 
-if ($has_identity) {
-    $waiting_count = count_status($conn, $service_date, 'waiting');
-    $interviewing_count = count_status($conn, $service_date, 'interviewing');
-    $awaiting_payment_count = count_status($conn, $service_date, 'awaiting_payment');
-    $ready_for_extraction_count = count_status($conn, $service_date, 'ready_for_extraction');
-    $completed_count = count_status($conn, $service_date, 'completed');
-
-    $next_number = next_suggested_number($conn);
+if ($show_name_card) {
+    $recent_names = get_recent_staff_names($conn);
+} else {
     $waiting_list = get_interview_queue($conn, $service_date);
     $awaiting_payment_list = get_awaiting_payment($conn, $service_date);
+    $next_number = next_suggested_number($conn, $service_date);
+    $recall_limit = (int) get_setting($conn, 'recall_limit', 3);
 
+    $window = INTERVIEW_WINDOW;
     $stmt = $conn->prepare(
         "SELECT * FROM queue WHERE service_date = ? AND interview_station = ? AND status = 'interviewing' LIMIT 1"
     );
-    $stmt->bind_param('si', $service_date, $interview_station);
+    $stmt->bind_param('si', $service_date, $window);
     $stmt->execute();
     $current_ticket = $stmt->get_result()->fetch_assoc() ?: null;
     $stmt->close();
 
-    $claimable_results = get_claimable_results($conn);
+    $ticket_printing_enabled = get_setting($conn, 'ticket_printing_enabled', '1') === '1';
+    $last_issued = get_last_issued($conn, $service_date);
+    $can_reprint = $is_ticket_station && $ticket_printing_enabled;
 }
-
-$WAITING_VISIBLE_LIMIT = 4;
 ?>
 <!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Laboratory Queueing — Encoder Console</title>
+<title>Laboratory Queueing — Front Desk</title>
 <link rel="stylesheet" href="assets/theme.css?v=<?= filemtime(__DIR__ . '/assets/theme.css') ?>">
 <style>
-    .alert-notice { background: var(--yellow-light); color: var(--yellow); }
-    .app-header .identity-bar { margin-left: auto; }
-    .identity-form { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-    .identity-form label { color: rgba(255,255,255,0.85); font-size: 0.8rem; font-weight: 600; }
-    .identity-form .field { padding: 6px 10px; font-size: 0.85rem; }
-    .identity-form input[name="interview_station"] { width: 70px; }
-    .current-ticket-card { width: auto; min-width: 260px; max-width: 360px; padding: 28px 24px; }
-    .current-ticket-card .queue-number { font-size: 3rem; }
-    .current-ticket-card .notes-form { width: 100%; margin-top: 14px; display: flex; flex-direction: column; gap: 6px; }
-    .current-ticket-card .notes-form .field { width: 100%; }
-    #paymentResultBox { min-height: 0; }
-    .payment-result-card { width: 100%; max-width: 560px; flex-direction: row; justify-content: space-between; align-items: center; text-align: left; padding: 20px 24px; gap: 16px; }
-    .payment-result-card .queue-number { font-size: 2.4rem; }
-    .payment-result-card .badge { margin-top: 6px; }
-    .payment-confirm-form { display: flex; flex-direction: column; align-items: flex-end; gap: 8px; }
-    @media (max-width: 900px) {
-        .app-header .identity-bar { margin-left: 0; width: 100%; }
-    }
-    .kbd-legend { text-align: center; font-size: 0.78rem; color: var(--text-muted); margin-bottom: 14px; }
-    .kbd-legend kbd {
-        display: inline-block; min-width: 1.4em; padding: 1px 6px; margin: 0 2px;
-        border: 1px solid var(--border); border-radius: 5px; background: var(--surface-alt);
-        font-family: var(--font); font-weight: 700; color: var(--text);
-    }
-    .waiting-col .queue-grid .extra-card { display: none; }
-    .waiting-col .queue-grid.show-all .extra-card { display: flex; }
-    #waitingSeeMoreBtn { margin-top: 12px; }
-    /* Wider/taller than the default .modal-box (280px/40vh) so the existing
-       2-column name grid and search bar have room, instead of squeezing a
-       grid built for that layout into a narrow single-column-ish box. */
-    .modal-box.claim-list-box { max-width: 640px; max-height: 78vh; }
+    .station-note { margin: 0 0 16px; font-size: 0.85rem; color: var(--text-muted); }
+    .station-note a { color: var(--green-dark); font-weight: 700; }
+    #findBox .alert { margin: 10px 0 0; text-align: left; }
+    .find-result { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 10px; padding: 10px 12px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); font-weight: 700; }
 </style>
-<script>
-    // --- Auto-refresh on DB update ---
-    let lastStatus = null;
-    async function pollQueueStatus() {
-        try {
-            const res = await fetch('queue_status.php');
-            if (!res.ok) return;
-            const data = await res.json();
-            if (lastStatus === null) {
-                lastStatus = JSON.stringify(data);
-            } else if (JSON.stringify(data) !== lastStatus) {
-                location.reload();
-            }
-        } catch (e) {}
-        setTimeout(pollQueueStatus, 3000);
-    }
-    pollQueueStatus();
-</script>
 </head>
 <body>
-    <div class="app-header">
-        <img src="CHO.png" alt="CHO Logo" class="logo-img">
-        <div class="title">Laboratory Queueing</div>
-        <div class="subtitle">Encoder Console</div>
-        <div class="identity-bar">
-            <form method="get" class="identity-form">
-                <label for="encoder_name">Encoder</label>
-                <input class="field" type="text" id="encoder_name" name="encoder_name" value="<?= htmlspecialchars($encoder_name) ?>" required>
-                <label for="interview_station">Station</label>
-                <input class="field" type="number" id="interview_station" name="interview_station" value="<?= $interview_station > 0 ? htmlspecialchars((string) $interview_station) : '' ?>" min="1" required>
-                <button type="submit" class="btn btn-sm"><?= $has_identity ? 'Change' : 'Set' ?></button>
-            </form>
-        </div>
-    </div>
+    <?php render_app_header('front_desk', $show_name_card ? '' : $encoder_name, 'index.php?change=1'); ?>
     <div class="page">
-        <?php if (!empty($error_message)): ?>
-            <div class="alert alert-error"><?= htmlspecialchars($error_message) ?></div>
+        <?php if ($success_message !== ''): ?>
+        <!-- Pop-up confirmation (top-right) instead of a banner: printing a
+             ticket should feel like a quick receipt, not a document job. -->
+        <div class="toast-stack" aria-live="polite">
+            <div class="toast" role="status" data-autohide="5000">
+                <span class="toast-icon">&#10003;</span>
+                <div><span class="toast-title"><?= htmlspecialchars($success_message) ?></span></div>
+            </div>
+        </div>
         <?php endif; ?>
-        <?php if (!empty($notice_message)): ?>
-            <div class="alert alert-notice"><?= htmlspecialchars($notice_message) ?></div>
+        <?php if ($notice_message !== ''): ?>
+            <div class="alert alert-notice" data-autohide><?= htmlspecialchars($notice_message) ?></div>
         <?php endif; ?>
 
-        <?php if (!$has_identity): ?>
-            <div class="empty-note">Set your name and station above to start the encoder console.</div>
+        <?php if ($show_name_card): ?>
+        <div class="name-card">
+            <h2>Who's at the front desk?</h2>
+            <p>Type or pick your name. It's saved with every patient you serve.</p>
+            <form method="get">
+                <input class="field" type="text" name="encoder_name" list="recentNames" value="<?= htmlspecialchars($encoder_name) ?>" placeholder="Your name" autocomplete="off" required autofocus>
+                <button type="submit" class="btn">Start</button>
+            </form>
+            <datalist id="recentNames">
+                <?php foreach ($recent_names as $name): ?>
+                <option value="<?= htmlspecialchars($name) ?>">
+                <?php endforeach; ?>
+            </datalist>
+        </div>
         <?php else: ?>
 
-        <div class="kbd-legend no-print">
-            Keyboard: <kbd>N</kbd> Call Next &nbsp; <kbd>P</kbd> For Payment &nbsp; <kbd>C</kbd> No Charge &nbsp; <kbd>R</kbd> Recall &nbsp; <kbd>S</kbd> No Show
+        <?php if ($is_ticket_station): ?>
+        <div class="ticket-bar no-print">
+            <button type="button" id="issueTicketBtn" class="btn btn-ticket" data-key="T"><?= $ticket_printing_enabled ? 'PRINT NEXT NUMBER' : 'ISSUE NEXT NUMBER (printing off)' ?><kbd>T</kbd></button>
+            <span class="next-hint">Next number: <strong><?= (int) $next_number ?></strong></span>
+            <?php if ($can_reprint && $last_issued): ?>
+            <button type="button" class="btn btn-outline btn-sm reprint-btn" data-id="<?= (int) $last_issued['id'] ?>">Reprint #<?= (int) $last_issued['queue_number'] ?></button>
+            <?php endif; ?>
         </div>
+        <div id="ticketError" class="alert alert-error no-print" style="display:none;"></div>
+        <?php else: ?>
+        <p class="station-note no-print">Queue numbers are printed at the ticket station PC. <a href="printer_setup.php">Printer setup</a></p>
+        <?php endif; ?>
 
-        <div class="stat-cards">
-            <div class="stat-card">
-                <span class="stat-label">Waiting</span>
-                <span class="stat-value"><?= $waiting_count ?></span>
-            </div>
-            <div class="stat-card">
-                <span class="stat-label">Interviewing</span>
-                <span class="stat-value"><?= $interviewing_count ?></span>
-            </div>
-            <div class="stat-card">
-                <span class="stat-label">Awaiting Payment</span>
-                <span class="stat-value"><?= $awaiting_payment_count ?></span>
-            </div>
-            <div class="stat-card">
-                <span class="stat-label">Ready for Extraction</span>
-                <span class="stat-value"><?= $ready_for_extraction_count ?></span>
-            </div>
-            <div class="stat-card">
-                <span class="stat-label">Completed Today</span>
-                <span class="stat-value"><?= $completed_count ?></span>
-            </div>
-        </div>
-
-        <form method="post" class="toolbar-form">
-            <label for="queue_number">Queue Number</label>
-            <input class="field" type="number" id="queue_number" name="queue_number" value="<?= htmlspecialchars((string) $next_number) ?>" min="1" required>
-            <button type="submit" name="add" class="btn">Add to Queue</button>
-        </form>
-
-        <div class="main-columns">
-            <div class="queue-section waiting-col">
-                <h2 class="section-title accent-green">Waiting for Interview (<?= count($waiting_list) ?>)</h2>
-                <button id="viewWaitingListBtn" class="btn btn-outline">View Full List</button>
-
-                <div id="waitingListModal" class="modal-overlay">
-                  <div class="modal-box">
-                    <button id="closeWaitingListModal" class="modal-close" aria-label="Close">&times;</button>
-                    <h2 class="section-title accent-green" style="margin-bottom:16px;">Waiting for Interview — Full List</h2>
-                    <table class="data-table">
-                        <tr><th>#</th><th>Queue Number</th><th>Waiting</th></tr>
-                        <?php if (empty($waiting_list)): ?>
-                        <tr><td colspan="3" class="no-logs">No one waiting.</td></tr>
-                        <?php else: $i = 1; foreach ($waiting_list as $row): $mins = elapsed_minutes($row['created_at']); ?>
-                        <tr>
-                            <td><?= $i++ ?></td>
-                            <td><?= htmlspecialchars($row['queue_number']) ?></td>
-                            <td><?= $mins !== null ? $mins . ' min' : '—' ?></td>
-                        </tr>
-                        <?php endforeach; endif; ?>
-                    </table>
-                  </div>
-                </div>
-
-                <div class="queue-grid">
-                    <?php if (empty($waiting_list)): ?>
-                    <div class="empty-note">No one waiting.</div>
-                    <?php else: foreach ($waiting_list as $i => $row): $mins = elapsed_minutes($row['created_at']);
-                        $tint = '';
-                        if ($mins !== null && $mins >= 30) $tint = ' priority';
-                        elseif ($mins !== null && $mins >= 15) $tint = ' pending';
-                        $extra = $i >= $WAITING_VISIBLE_LIMIT ? ' extra-card' : '';
-                    ?>
-                    <div class="queue-card<?= $tint . $extra ?>">
-                        <span class="queue-number"><?= htmlspecialchars($row['queue_number']) ?></span>
-                        <div class="info"><?= $mins !== null ? $mins . ' min waiting' : '' ?></div>
+        <div class="work-area">
+            <section class="hero-card" aria-label="Now serving">
+                <div class="hero-label">Now Serving</div>
+                <?php if ($current_ticket): $called_mins = elapsed_minutes($current_ticket['interview_called_at']); $recalls = (int) $current_ticket['recall_count']; ?>
+                    <div class="hero-number"><?= htmlspecialchars($current_ticket['queue_number']) ?></div>
+                    <div class="hero-meta">
+                        Called <?= $called_mins !== null && $called_mins > 0 ? $called_mins . ' min ago' : 'just now' ?><?= $recalls > 0 ? ' · called again ' . $recalls . '×' : '' ?>
                     </div>
-                    <?php endforeach; endif; ?>
-                </div>
-                <?php if (count($waiting_list) > $WAITING_VISIBLE_LIMIT): ?>
-                <button type="button" id="waitingSeeMoreBtn" class="btn btn-outline btn-sm">See More (<?= count($waiting_list) - $WAITING_VISIBLE_LIMIT ?>)</button>
-                <?php endif; ?>
-            </div>
 
-            <div class="queue-section">
-                <h2 class="section-title accent-green">Now Interviewing</h2>
-                <?php if ($current_ticket): ?>
-                    <div class="queue-card current-ticket-card">
-                        <span class="queue-number"><?= htmlspecialchars($current_ticket['queue_number']) ?></span>
-                        <?php if ((int) $current_ticket['recall_count'] > 0): ?>
-                        <div class="info">Recalled <?= (int) $current_ticket['recall_count'] ?>x</div>
-                        <?php endif; ?>
-
-                        <div class="card-actions" style="margin-top:14px;">
-                            <form method="post" style="display:inline">
-                                <input type="hidden" name="id" value="<?= $current_ticket['id'] ?>">
-                                <input type="hidden" name="encoder_name" value="<?= htmlspecialchars($encoder_name) ?>">
-                                <input type="hidden" name="interview_station" value="<?= $interview_station ?>">
-                                <button type="submit" name="for_payment" class="btn btn-warning">FOR PAYMENT</button>
-                            </form>
-                            <form method="post" style="display:inline">
-                                <input type="hidden" name="id" value="<?= $current_ticket['id'] ?>">
-                                <input type="hidden" name="encoder_name" value="<?= htmlspecialchars($encoder_name) ?>">
-                                <input type="hidden" name="interview_station" value="<?= $interview_station ?>">
-                                <button type="submit" name="no_charge" class="btn">NO CHARGE</button>
-                            </form>
-                        </div>
-                        <div class="card-actions">
-                            <form method="post" style="display:inline">
-                                <input type="hidden" name="id" value="<?= $current_ticket['id'] ?>">
-                                <input type="hidden" name="encoder_name" value="<?= htmlspecialchars($encoder_name) ?>">
-                                <input type="hidden" name="interview_station" value="<?= $interview_station ?>">
-                                <button type="submit" name="recall" class="btn btn-info btn-sm">Recall</button>
-                            </form>
-                            <form method="post" style="display:inline" id="noShowForm">
-                                <input type="hidden" name="id" value="<?= $current_ticket['id'] ?>">
-                                <input type="hidden" name="encoder_name" value="<?= htmlspecialchars($encoder_name) ?>">
-                                <input type="hidden" name="interview_station" value="<?= $interview_station ?>">
-                                <button type="submit" name="no_show" class="btn btn-neutral btn-sm">No Show</button>
-                            </form>
-                        </div>
-
-                        <div id="noShowModal" class="modal-overlay">
-                            <div class="modal-box confirm-box">
-                                <h3>No Show?</h3>
-                                <p>Queue #<?= htmlspecialchars($current_ticket['queue_number']) ?></p>
-                                <div class="confirm-actions">
-                                    <button type="button" id="noShowCancelBtn" class="btn btn-outline">No</button>
-                                    <button type="button" id="noShowConfirmBtn" class="btn btn-warning">Yes, No Show</button>
-                                </div>
-                            </div>
-                        </div>
-                        <form method="post" class="notes-form">
-                            <input type="hidden" name="id" value="<?= $current_ticket['id'] ?>">
+                    <div class="hero-actions">
+                        <form method="post">
+                            <input type="hidden" name="id" value="<?= (int) $current_ticket['id'] ?>">
                             <input type="hidden" name="encoder_name" value="<?= htmlspecialchars($encoder_name) ?>">
-                            <input type="hidden" name="interview_station" value="<?= $interview_station ?>">
-                            <input class="field" type="text" name="notes" placeholder="Notes..." value="<?= htmlspecialchars($current_ticket['notes'] ?? '') ?>">
-                            <button type="submit" name="save_notes" class="btn btn-sm">Save Notes</button>
+                            <button type="submit" name="for_payment" class="btn btn-warning btn-big" data-key="P"><span>FOR PAYMENT<kbd>P</kbd></span><small>Pays at City Hall first</small></button>
+                        </form>
+                        <form method="post">
+                            <input type="hidden" name="id" value="<?= (int) $current_ticket['id'] ?>">
+                            <input type="hidden" name="encoder_name" value="<?= htmlspecialchars($encoder_name) ?>">
+                            <button type="submit" name="no_charge" class="btn btn-big" data-key="C"><span>NO CHARGE<kbd>C</kbd></span><small>Goes straight to extraction</small></button>
                         </form>
                     </div>
-                <?php else: ?>
-                    <div class="empty-note">No one currently being interviewed at this station.</div>
-                <?php endif; ?>
 
-                <form method="post" id="callNextForm" style="margin-top:18px;">
-                    <input type="hidden" name="encoder_name" value="<?= htmlspecialchars($encoder_name) ?>">
-                    <input type="hidden" name="interview_station" value="<?= $interview_station ?>">
-                    <button type="submit" name="call_next" class="btn" <?= $current_ticket ? 'disabled' : '' ?>>CALL NEXT</button>
-                </form>
-            </div>
-
-            <div class="queue-section">
-                <h2 class="section-title accent-orange">Awaiting Payment</h2>
-                <div class="queue-grid">
-                    <?php if (empty($awaiting_payment_list)): ?>
-                    <div class="empty-note">No one awaiting payment.</div>
-                    <?php else: foreach ($awaiting_payment_list as $row): $mins = elapsed_minutes($row['interview_completed_at']);
-                        $tint = ($mins !== null && $mins >= 45) ? 'priority' : 'pending';
-                    ?>
-                    <div class="queue-card <?= $tint ?>">
-                        <span class="queue-number"><?= htmlspecialchars($row['queue_number']) ?></span>
-                        <div class="info"><?= $mins !== null ? $mins . ' min away' : '' ?></div>
+                    <div class="hero-more">
+                        <form method="post">
+                            <input type="hidden" name="id" value="<?= (int) $current_ticket['id'] ?>">
+                            <input type="hidden" name="encoder_name" value="<?= htmlspecialchars($encoder_name) ?>">
+                            <button type="submit" name="recall" class="btn btn-outline btn-sm" data-key="R" <?= $recalls >= $recall_limit ? 'disabled title="Called ' . $recalls . ' times already. Mark as No Show if they are not here."' : '' ?>>Call again<kbd>R</kbd></button>
+                        </form>
+                        <button type="button" class="btn btn-outline btn-sm" data-key="S" data-open-dialog="noShowDialog">No show<kbd>S</kbd></button>
+                        <button type="button" class="btn btn-outline btn-sm" id="noteToggle"><?= ($current_ticket['notes'] ?? '') !== '' ? 'Edit note' : 'Add note' ?></button>
                     </div>
-                    <?php endforeach; endif; ?>
-                </div>
-            </div>
-        </div>
 
-        <div class="main-columns" style="margin-top:22px;">
-            <div class="queue-section">
-                <h2 class="section-title accent-orange">Payment Confirmation</h2>
-                <form id="paymentSearchForm" class="toolbar-form">
-                    <label for="paymentSearchInput">Queue Number</label>
-                    <input class="field" type="number" id="paymentSearchInput" name="queue_number" style="font-size:1.3rem;font-weight:700;width:150px;text-align:center;" autofocus autocomplete="off" min="1">
-                    <button type="submit" class="btn">Find</button>
-                </form>
-                <div id="paymentResultBox" style="width:100%;display:flex;justify-content:center;margin:6px 0 22px;"></div>
+                    <?php if (($current_ticket['notes'] ?? '') !== ''): ?>
+                    <div class="hero-note" id="noteText">Note: <?= htmlspecialchars($current_ticket['notes']) ?></div>
+                    <?php endif; ?>
+                    <form method="post" class="note-form" id="noteForm" hidden>
+                        <input type="hidden" name="id" value="<?= (int) $current_ticket['id'] ?>">
+                        <input type="hidden" name="encoder_name" value="<?= htmlspecialchars($encoder_name) ?>">
+                        <input class="field" type="text" name="notes" placeholder="Note for this patient" value="<?= htmlspecialchars($current_ticket['notes'] ?? '') ?>" autocomplete="off">
+                        <button type="submit" name="save_notes" class="btn btn-sm">Save</button>
+                    </form>
 
-                <div class="queue-grid grid-cols-2">
-                    <?php if (empty($awaiting_payment_list)): ?>
-                    <div class="empty-note">No one awaiting payment.</div>
-                    <?php else: foreach ($awaiting_payment_list as $row): ?>
-                    <div class="queue-card pending clickable awaiting-card" data-number="<?= (int) $row['queue_number'] ?>">
-                        <span class="queue-number"><?= htmlspecialchars($row['queue_number']) ?></span>
-                        <?php $mins = elapsed_minutes($row['interview_completed_at']); ?>
-                        <div class="info"><?= $mins !== null ? $mins . ' min away' : '' ?></div>
-                    </div>
-                    <?php endforeach; endif; ?>
-                </div>
-            </div>
-
-            <div class="queue-section">
-                <h2 class="section-title accent-orange">Ready for Claiming</h2>
-                <form id="addClaimForm" class="toolbar-form">
-                    <label for="claim_surname">Surname</label>
-                    <input class="field" type="text" id="claim_surname" name="surname" autocomplete="off">
-                    <label for="claim_initials">First Name Initials</label>
-                    <input class="field" type="text" id="claim_initials" name="first_name_initials" placeholder="e.g. J.M." autocomplete="off" style="width:110px;">
-                    <button type="submit" name="add_claimable" class="btn">Add</button>
-                </form>
-                <div id="claimFormError" class="alert alert-error" style="display:none;width:100%;margin-top:-8px;"></div>
-
-                <div class="toolbar-form" style="margin-top:10px;">
-                    <label for="claimSearchInput">Search</label>
-                    <input class="field" type="text" id="claimSearchInput" placeholder="Surname or initials..." autocomplete="off" style="width:220px;">
-                    <button type="button" id="claimSearchClear" class="btn btn-outline btn-sm" style="display:none;">&times; Clear</button>
-                </div>
-                <div id="claimSearchResults" class="queue-grid grid-cols-2" style="display:none;margin-top:6px;"></div>
-
-                <button type="button" id="openClaimListBtn" class="btn btn-outline" style="margin-top:14px;">Show Ready for Claiming List</button>
-
-                <div id="claimListModal" class="modal-overlay">
-                  <div class="modal-box claim-list-box">
-                    <button id="closeClaimListModal" class="modal-close" aria-label="Close">&times;</button>
-                    <h2 class="section-title accent-orange" style="margin-bottom:16px;">Ready for Claiming — Full List</h2>
-                    <div class="queue-grid grid-cols-2" id="claimGrid">
-                        <?php if (empty($claimable_results)): ?>
-                        <div class="empty-note">No results ready for claiming.</div>
-                        <?php else: foreach ($claimable_results as $row): ?>
-                        <div class="queue-card" data-claim-id="<?= (int) $row['id'] ?>">
-                            <span class="claim-name"><?= htmlspecialchars($row['surname']) ?>, <?= htmlspecialchars($row['first_name_initials']) ?></span>
-                            <form class="card-form claim-claimed-form">
-                                <button type="submit" name="mark_claimed" class="btn btn-sm">Claimed</button>
+                    <div id="noShowDialog" class="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="noShowTitle">
+                        <div class="modal-box dialog-box">
+                            <h3 id="noShowTitle">Mark #<?= htmlspecialchars($current_ticket['queue_number']) ?> as No Show?</h3>
+                            <p>Use this when the patient didn't come after being called.</p>
+                            <form method="post" class="dialog-actions">
+                                <input type="hidden" name="id" value="<?= (int) $current_ticket['id'] ?>">
+                                <input type="hidden" name="encoder_name" value="<?= htmlspecialchars($encoder_name) ?>">
+                                <button type="button" class="btn btn-outline" data-close-dialog>Cancel</button>
+                                <button type="submit" name="no_show" class="btn btn-warning">Yes, No Show</button>
                             </form>
                         </div>
-                        <?php endforeach; endif; ?>
                     </div>
-                  </div>
+                <?php else: ?>
+                    <div class="hero-empty">No patient at the window.</div>
+                    <form method="post" id="callNextForm">
+                        <input type="hidden" name="encoder_name" value="<?= htmlspecialchars($encoder_name) ?>">
+                        <?php if (empty($waiting_list)): ?>
+                        <button type="submit" name="call_next" class="btn btn-big" disabled><span>CALL NEXT</span><small>No one waiting</small></button>
+                        <?php else: $first_mins = elapsed_minutes($waiting_list[0]['created_at']); ?>
+                        <button type="submit" name="call_next" class="btn btn-big" data-key="N">
+                            <span>CALL NEXT<kbd>N</kbd></span>
+                            <small><?= count($waiting_list) ?> waiting · next is #<?= (int) $waiting_list[0]['queue_number'] ?><?= $first_mins !== null ? ' (' . $first_mins . ' min)' : '' ?></small>
+                        </button>
+                        <?php endif; ?>
+                    </form>
+                <?php endif; ?>
+            </section>
+
+            <aside>
+                <section class="side-panel" aria-label="Waiting">
+                    <h3>Waiting <span class="count"><?= count($waiting_list) ?></span></h3>
+                    <?php if (empty($waiting_list)): ?>
+                    <div class="empty-note">No one waiting.</div>
+                    <?php else: ?>
+                    <div class="chip-list" id="waitingChips">
+                        <?php foreach ($waiting_list as $i => $row):
+                            $mins = elapsed_minutes($row['created_at']);
+                            $tint = $mins !== null && $mins >= 30 ? ' priority' : ($mins !== null && $mins >= 15 ? ' pending' : '');
+                            $extra = $i >= WAITING_VISIBLE_LIMIT ? ' extra' : '';
+                            $mins_text = $mins !== null ? $mins . 'm' : '';
+                        ?>
+                        <?php if ($can_reprint): ?>
+                        <button type="button" class="chip waiting-chip<?= $tint . $extra ?>" data-id="<?= (int) $row['id'] ?>" data-number="<?= (int) $row['queue_number'] ?>" data-mins="<?= (int) $mins ?>"><?= (int) $row['queue_number'] ?><small><?= $mins_text ?></small></button>
+                        <?php else: ?>
+                        <span class="chip<?= $tint . $extra ?>"><?= (int) $row['queue_number'] ?><small><?= $mins_text ?></small></span>
+                        <?php endif; ?>
+                        <?php endforeach; ?>
+                    </div>
+                    <?php if (count($waiting_list) > WAITING_VISIBLE_LIMIT): ?>
+                    <button type="button" class="link-button" id="waitingMoreBtn">+<?= count($waiting_list) - WAITING_VISIBLE_LIMIT ?> more</button>
+                    <?php endif; ?>
+                    <?php if ($can_reprint): ?>
+                    <p class="hint">Tap a number to reprint that patient's ticket.</p>
+                    <?php endif; ?>
+                    <?php endif; ?>
+                </section>
+
+                <section class="side-panel" aria-label="Back from payment">
+                    <h3>Back from Payment <span class="count"><?= count($awaiting_payment_list) ?></span></h3>
+                    <?php if (empty($awaiting_payment_list)): ?>
+                    <div class="empty-note">No one is away paying.</div>
+                    <?php else: ?>
+                    <div class="chip-list">
+                        <?php foreach ($awaiting_payment_list as $row): $mins = elapsed_minutes($row['interview_completed_at']); ?>
+                        <button type="button" class="chip pay-chip<?= $mins !== null && $mins >= 45 ? ' priority' : ' pending' ?>" data-id="<?= (int) $row['id'] ?>" data-number="<?= (int) $row['queue_number'] ?>" data-mins="<?= (int) $mins ?>"><?= (int) $row['queue_number'] ?><small><?= $mins !== null ? $mins . 'm away' : '' ?></small></button>
+                        <?php endforeach; ?>
+                    </div>
+                    <p class="hint">Tap the patient's number when they come back with their receipt.</p>
+                    <?php endif; ?>
+                    <button type="button" class="link-button" id="findToggle">Can't find the number?</button>
+                    <div id="findBox" hidden>
+                        <div class="inline-row">
+                            <input class="field" type="number" id="paymentSearchInput" placeholder="Type the queue number" min="1" autocomplete="off">
+                        </div>
+                        <div id="paymentResultBox"></div>
+                    </div>
+                </section>
+            </aside>
+        </div>
+
+        <div id="payDialog" class="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="payDialogTitle">
+            <div class="modal-box dialog-box">
+                <h3 id="payDialogTitle">Confirm payment</h3>
+                <div class="dialog-number" id="payDialogNumber"></div>
+                <p id="payDialogMeta"></p>
+                <form id="payDialogForm">
+                    <input class="field" type="text" name="payment_reference" placeholder="OR number (optional)" autocomplete="off">
+                    <div class="dialog-actions">
+                        <button type="button" class="btn btn-outline" data-close-dialog>Cancel</button>
+                        <button type="submit" class="btn">Confirm Payment</button>
+                    </div>
+                </form>
+                <div id="payDialogError" class="alert alert-error" hidden></div>
+            </div>
+        </div>
+
+        <?php if ($can_reprint): ?>
+        <div id="waitingDialog" class="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="waitingDialogTitle">
+            <div class="modal-box dialog-box">
+                <h3 id="waitingDialogTitle">Waiting ticket</h3>
+                <div class="dialog-number" id="waitingDialogNumber"></div>
+                <p id="waitingDialogMeta"></p>
+                <div class="dialog-actions">
+                    <button type="button" class="btn btn-outline" data-close-dialog>Close</button>
+                    <button type="button" class="btn reprint-btn" id="waitingDialogReprint">Reprint ticket</button>
                 </div>
             </div>
         </div>
+        <?php endif; ?>
 
         <?php endif; ?>
     </div>
 
+    <script src="assets/app.js?v=<?= filemtime(__DIR__ . '/assets/app.js') ?>"></script>
+    <?php if (!$show_name_card): ?>
     <script>
-        // Modal open/close logic for Waiting List
-        const viewBtn = document.getElementById('viewWaitingListBtn');
-        const modal = document.getElementById('waitingListModal');
-        const closeBtn = document.getElementById('closeWaitingListModal');
-        if (viewBtn && modal && closeBtn) {
-            viewBtn.onclick = () => { modal.style.display = 'flex'; };
-            closeBtn.onclick = () => { modal.style.display = 'none'; };
-            window.onclick = function(event) {
-                if (event.target === modal) modal.style.display = 'none';
-            };
+    // Set while a ticket is being issued/printed (see printTicket() below).
+    // Issuing a number is itself a queue change, so the poller must not reload
+    // the page mid-print; printTicket() reloads when it's done.
+    let ticketPrintBusy = false;
+    LabUI.startPolling({ interval: 3000, holdWhile: function() { return ticketPrintBusy; } });
+
+    const currentEncoderName = <?= json_encode($encoder_name) ?>;
+
+    // Set by printTicket() when Chrome showed its print window instead of
+    // printing silently (see the note there).
+    (function() {
+        let dialogShown = false;
+        try {
+            dialogShown = sessionStorage.getItem('labPrintDialogShown') === '1';
+            sessionStorage.removeItem('labPrintDialogShown');
+        } catch (e) {}
+        if (dialogShown) {
+            LabUI.toast('Print window appeared',
+                ' To print tickets instantly with no window, open the Front Desk from the "Lab Queue – Front Desk" desktop shortcut (see Printer).',
+                'warning', 15000);
         }
+    })();
 
-        // "See More" for the waiting grid: cards beyond the initial cap render
-        // in the DOM already (server-side), just hidden via CSS, so this is a
-        // plain toggle rather than a fetch/reload.
-        const waitingSeeMoreBtn = document.getElementById('waitingSeeMoreBtn');
-        const waitingGrid = document.querySelector('.waiting-col .queue-grid');
-        if (waitingSeeMoreBtn && waitingGrid) {
-            const hiddenCount = waitingGrid.querySelectorAll('.extra-card').length;
-            waitingSeeMoreBtn.addEventListener('click', function() {
-                const expanded = waitingGrid.classList.toggle('show-all');
-                waitingSeeMoreBtn.textContent = expanded ? 'See Less' : 'See More (' + hiddenCount + ')';
-            });
-        }
+    function escapeHtml(s) {
+        const d = document.createElement('div');
+        d.textContent = s == null ? '' : s;
+        return d.innerHTML;
+    }
 
-        // Keep the button state driven by the server render. Disabling it here
-        // can leave the UI stuck after a queue reset or a slow redirect.
-        const callNextForm = document.getElementById('callNextForm');
-        if (callNextForm) {
-            callNextForm.addEventListener('submit', function() {
-                const btn = this.querySelector('button[type=submit]');
-                if (btn) {
-                    btn.blur();
-                }
-            });
-        }
+    function postAction(fields) {
+        const body = new URLSearchParams();
+        Object.keys(fields).forEach(function(k) { body.set(k, fields[k]); });
+        body.set('encoder_name', currentEncoderName);
+        return fetch('', { method: 'POST', body: body, headers: { 'X-Requested-With': 'XMLHttpRequest' } })
+            .then(function(r) { return r.json(); });
+    }
 
-        // Themed No Show confirmation — replaces the native confirm() dialog
-        // (browser-chrome popups don't take app CSS) with the same
-        // modal-overlay/modal-box pattern used by the waiting-list modal.
-        const noShowForm = document.getElementById('noShowForm');
-        const noShowModal = document.getElementById('noShowModal');
-        const noShowConfirmBtn = document.getElementById('noShowConfirmBtn');
-        const noShowCancelBtn = document.getElementById('noShowCancelBtn');
-        if (noShowForm && noShowModal && noShowConfirmBtn && noShowCancelBtn) {
-            noShowForm.addEventListener('submit', function(e) {
-                e.preventDefault();
-                noShowModal.style.display = 'flex';
-            });
-            noShowConfirmBtn.addEventListener('click', function() {
-                noShowModal.style.display = 'none';
-                noShowForm.submit();
-            });
-            noShowCancelBtn.addEventListener('click', function() {
-                noShowModal.style.display = 'none';
-            });
-            window.addEventListener('click', function(e) {
-                if (e.target === noShowModal) noShowModal.style.display = 'none';
-            });
-        }
+    // --- Ticket printing (XP-80T on the ticket station PC) ---
+    // PRINT NEXT NUMBER issues the number server-side (issue_ticket), then
+    // printTicket() loads ticket_print.php into an off-screen iframe and prints
+    // it. The ticket station's Chrome runs with --kiosk-printing, so print()
+    // goes straight to the default printer (the XP-80T) with no dialog — see
+    // printer_setup.php's checklist.
+    (function() {
+        const issueBtn = document.getElementById('issueTicketBtn');
+        const errorBox = document.getElementById('ticketError');
+        const issueBtnHtml = issueBtn ? issueBtn.innerHTML : '';
 
-        // Keyboard shortcuts (see the legend above the stat cards). Ignored
-        // while typing in a field, and a no-op if the matching button isn't
-        // present/enabled — e.g. N does nothing once a ticket is already active.
-        document.addEventListener('keydown', function(e) {
-            if (e.altKey || e.ctrlKey || e.metaKey) return;
-            const tag = (document.activeElement && document.activeElement.tagName || '').toLowerCase();
-            if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
-
-            const shortcuts = {
-                N: '#callNextForm button[type=submit]',
-                P: 'button[name=for_payment]',
-                C: 'button[name=no_charge]',
-                R: 'button[name=recall]',
-                S: 'button[name=no_show]',
-            };
-            const selector = shortcuts[e.key.toUpperCase()];
-            if (!selector) return;
-            const btn = document.querySelector(selector);
-            if (btn && !btn.disabled) {
-                e.preventDefault();
-                btn.click();
+        function printTicket(id, reprint) {
+            // Off-screen rather than display:none — Chrome prints a
+            // display:none iframe as a blank page.
+            let frame = document.getElementById('ticketPrintFrame');
+            if (!frame) {
+                frame = document.createElement('iframe');
+                frame.id = 'ticketPrintFrame';
+                frame.setAttribute('aria-hidden', 'true');
+                frame.style.cssText = 'position:fixed;left:-10000px;top:0;width:80mm;height:200mm;border:0;';
+                document.body.appendChild(frame);
             }
+            let finished = false;
+            function done() {
+                if (finished) return;
+                finished = true;
+                location.reload();
+            }
+            frame.onload = function() {
+                const doc = frame.contentDocument;
+                // A new iframe's initial empty document can fire its own load
+                // event — wait for ticket_print.php itself.
+                if (doc && doc.URL === 'about:blank') return;
+                // ticket_print.php marks a stale/unknown ticket non-printable.
+                if (!doc || !doc.body || doc.body.dataset.printable !== '1') {
+                    done();
+                    return;
+                }
+                frame.contentWindow.addEventListener('afterprint', function() { setTimeout(done, 300); });
+                frame.contentWindow.focus();
+                // With --kiosk-printing, print() hands the ticket straight to the
+                // XP-80T and returns at once. If it blocked for a while, Chrome
+                // showed its print window instead — remember that so the page can
+                // explain how to get silent printing after it reloads.
+                const started = Date.now();
+                frame.contentWindow.print();
+                if (Date.now() - started > 1500) {
+                    try { sessionStorage.setItem('labPrintDialogShown', '1'); } catch (e) {}
+                }
+                setTimeout(done, 2000);
+            };
+            // Safety net: never leave the console stuck if the ticket page fails to load.
+            setTimeout(done, 10000);
+            frame.src = 'ticket_print.php?id=' + encodeURIComponent(id) + (reprint ? '&reprint=1' : '') + '&t=' + Date.now();
+        }
+
+        function showTicketError(msg) {
+            ticketPrintBusy = false;
+            LabUI.closeDialog(document.querySelector('.modal-overlay.open'));
+            if (errorBox) {
+                errorBox.textContent = msg;
+                errorBox.style.display = 'block';
+            }
+            if (issueBtn) {
+                issueBtn.disabled = false;
+                issueBtn.innerHTML = issueBtnHtml;
+            }
+        }
+
+        if (issueBtn) {
+            issueBtn.addEventListener('click', function() {
+                // One click = one number: a double-click or a held-down T key
+                // lands here again while busy and is ignored.
+                if (ticketPrintBusy) return;
+                ticketPrintBusy = true;
+                issueBtn.disabled = true;
+                issueBtn.textContent = <?= json_encode(($ticket_printing_enabled ?? true) ? 'Printing…' : 'Issuing…') ?>;
+                if (errorBox) errorBox.style.display = 'none';
+                postAction({ issue_ticket: '1' })
+                    .then(function(res) {
+                        if (!res.ok) {
+                            showTicketError(res.error || 'Could not issue a number. Please try again.');
+                        } else if (res.print) {
+                            printTicket(res.id, false);
+                        } else {
+                            location.reload();
+                        }
+                    })
+                    .catch(function() {
+                        showTicketError('Network error. The number may or may not have been issued, so check the waiting list before trying again.');
+                    });
+            });
+        }
+
+        // Reprint #N (ticket bar) and Reprint ticket (waiting number pop-up).
+        document.addEventListener('click', function(e) {
+            const btn = e.target.closest('.reprint-btn');
+            if (!btn || ticketPrintBusy) return;
+            ticketPrintBusy = true;
+            btn.disabled = true;
+            if (errorBox) errorBox.style.display = 'none';
+            postAction({ reprint_ticket: '1', id: btn.dataset.id })
+                .then(function(res) {
+                    if (res.ok) {
+                        printTicket(res.id, true);
+                    } else {
+                        btn.disabled = false;
+                        showTicketError(res.error || 'Could not reprint this ticket.');
+                    }
+                })
+                .catch(function() {
+                    btn.disabled = false;
+                    showTicketError('Network error. Please try the reprint again.');
+                });
+        });
+    })();
+
+    // --- Waiting numbers: "+N more", and tap a number to reprint its ticket ---
+    (function() {
+        const chips = document.getElementById('waitingChips');
+        const moreBtn = document.getElementById('waitingMoreBtn');
+        if (chips && moreBtn) {
+            const moreLabel = moreBtn.textContent;
+            moreBtn.addEventListener('click', function() {
+                const expanded = chips.classList.toggle('show-all');
+                moreBtn.textContent = expanded ? 'Show fewer' : moreLabel;
+            });
+        }
+        const reprintBtn = document.getElementById('waitingDialogReprint');
+        document.querySelectorAll('.waiting-chip').forEach(function(chip) {
+            chip.addEventListener('click', function() {
+                document.getElementById('waitingDialogNumber').textContent = chip.dataset.number;
+                document.getElementById('waitingDialogMeta').textContent = 'Waiting ' + chip.dataset.mins + ' min';
+                reprintBtn.dataset.id = chip.dataset.id;
+                reprintBtn.disabled = false;
+                LabUI.openDialog('waitingDialog');
+            });
+        });
+    })();
+
+    // --- Back from Payment: tap a number (or find it), then Confirm ---
+    (function() {
+        const dialogNumber = document.getElementById('payDialogNumber');
+        const dialogMeta = document.getElementById('payDialogMeta');
+        const form = document.getElementById('payDialogForm');
+        const errorBox = document.getElementById('payDialogError');
+        let current = null;
+
+        function openPayDialog(id, number, awayMinutes) {
+            current = { id: id, number: number };
+            dialogNumber.textContent = number;
+            dialogMeta.textContent = awayMinutes !== null && awayMinutes !== '' ? 'Away ' + awayMinutes + ' min' : '';
+            form.reset();
+            errorBox.hidden = true;
+            form.querySelector('button[type=submit]').disabled = false;
+            LabUI.openDialog('payDialog');
+        }
+
+        document.querySelectorAll('.pay-chip').forEach(function(chip) {
+            chip.addEventListener('click', function() {
+                openPayDialog(chip.dataset.id, chip.dataset.number, chip.dataset.mins);
+            });
         });
 
-        // Focus management: land on whatever the encoder will most likely do
-        // next, so keyboard shortcuts and fast typing work immediately after
-        // every reload without a mouse click first.
-        (function() {
-            const currentTicketCard = document.querySelector('.current-ticket-card');
-            if (currentTicketCard) {
-                const firstDecisionBtn = document.querySelector('button[name=for_payment]');
-                if (firstDecisionBtn) firstDecisionBtn.focus();
-            } else {
-                const qnInput = document.getElementById('queue_number');
-                if (qnInput) qnInput.focus();
-            }
-        })();
-    </script>
+        form.addEventListener('submit', function(e) {
+            e.preventDefault();
+            if (!current) return;
+            const btn = form.querySelector('button[type=submit]');
+            btn.disabled = true;
+            postAction({
+                payment_confirm: '1',
+                id: current.id,
+                queue_number: current.number,
+                payment_reference: form.querySelector('input[name=payment_reference]').value,
+            }).then(function(res) {
+                if (res.ok) {
+                    location.reload(); // the success message comes back as a flash
+                } else {
+                    errorBox.textContent = res.message || 'This number could not be confirmed.';
+                    errorBox.hidden = false;
+                    btn.disabled = false;
+                }
+            }).catch(function() {
+                errorBox.textContent = 'Network error. Please try again.';
+                errorBox.hidden = false;
+                btn.disabled = false;
+            });
+        });
 
-    <script>
-    // --- Payment Confirmation panel: inline AJAX search + confirm ---
-    (function() {
+        // "Can't find the number?" — the old payment search, now tucked away.
+        const findToggle = document.getElementById('findToggle');
+        const findBox = document.getElementById('findBox');
         const input = document.getElementById('paymentSearchInput');
         const resultBox = document.getElementById('paymentResultBox');
-        const form = document.getElementById('paymentSearchForm');
-        if (!input || !resultBox || !form) return;
-
-        const currentEncoderName = <?= json_encode($encoder_name) ?>;
         let debounceTimer = null;
 
-        function escapeHtml(s) {
-            const d = document.createElement('div');
-            d.textContent = s == null ? '' : s;
-            return d.innerHTML;
-        }
+        findToggle.addEventListener('click', function() {
+            findBox.hidden = !findBox.hidden;
+            if (!findBox.hidden) input.focus();
+        });
 
-        function renderResult(data, queueNumber) {
+        function renderResult(data, n) {
             if (!data.found) {
-                resultBox.innerHTML = '<div class="alert alert-error">' + escapeHtml(data.message || ('No number ' + queueNumber + ' issued today.')) + '</div>';
+                resultBox.innerHTML = '<div class="alert alert-error">' + escapeHtml(data.message || ('No number ' + n + ' issued today.')) + '</div>';
                 return;
             }
             const row = data.row;
-            let html = '<div class="queue-card payment-result-card">';
-            html += '<div><span class="queue-number">' + row.queue_number + '</span>';
-            html += '<div class="info">Added: ' + (row.created_at_display || '—') + ' &middot; Interviewed: ' + (row.interview_completed_at_display || '—') + '</div>';
-            if (row.away_minutes !== null) html += '<div class="info">Away ' + row.away_minutes + ' min</div>';
-            html += '<span class="badge ' + row.badge_class + '">' + escapeHtml(row.badge_label) + '</span></div>';
             if (data.confirmable) {
-                html += '<form id="confirmPaymentForm" class="payment-confirm-form">'
-                      + '<input class="field" type="text" name="payment_reference" placeholder="OR / Reference No.">'
-                      + '<button type="submit" class="btn" style="min-width:190px;">CONFIRM PAYMENT</button>'
-                      + '</form>';
-            } else {
-                html += '<div class="alert alert-error" style="margin:0;max-width:260px;">' + escapeHtml(data.message) + '</div>';
-            }
-            html += '</div>';
-            resultBox.innerHTML = html;
-
-            const confirmForm = document.getElementById('confirmPaymentForm');
-            if (confirmForm) {
-                confirmForm.addEventListener('submit', function(e) {
-                    e.preventDefault();
-                    const btn = this.querySelector('button[type=submit]');
-                    btn.disabled = true;
-                    const body = new URLSearchParams();
-                    body.set('payment_confirm', '1');
-                    body.set('id', row.id);
-                    body.set('queue_number', row.queue_number);
-                    body.set('encoder_name', currentEncoderName);
-                    body.set('payment_reference', this.querySelector('input[name=payment_reference]').value);
-                    fetch('', { method: 'POST', body: body, headers: { 'X-Requested-With': 'XMLHttpRequest' } })
-                        .then(function(r) { return r.json(); })
-                        .then(function(res) {
-                            if (res.ok) {
-                                resultBox.innerHTML = '<div class="alert" style="background:var(--green-light);color:var(--green-dark);">' + escapeHtml(res.message) + '</div>';
-                                input.value = '';
-                                input.focus();
-                            } else {
-                                renderResult(res, row.queue_number);
-                            }
-                        });
+                resultBox.innerHTML = '<div class="find-result"><span>#' + row.queue_number
+                    + (row.away_minutes !== null ? ' · away ' + row.away_minutes + ' min' : '') + '</span>'
+                    + '<button type="button" class="btn btn-sm" id="findConfirmBtn">Confirm payment</button></div>';
+                document.getElementById('findConfirmBtn').addEventListener('click', function() {
+                    openPayDialog(row.id, row.queue_number, row.away_minutes);
                 });
+            } else {
+                resultBox.innerHTML = '<div class="alert alert-notice">' + escapeHtml(data.message) + '</div>';
             }
         }
 
         function doSearch() {
             const n = parseInt(input.value, 10);
             if (!n || n <= 0) { resultBox.innerHTML = ''; return; }
-            const body = new URLSearchParams();
-            body.set('payment_search', '1');
-            body.set('queue_number', n);
-            fetch('', { method: 'POST', body: body, headers: { 'X-Requested-With': 'XMLHttpRequest' } })
-                .then(function(r) { return r.json(); })
+            postAction({ payment_search: '1', queue_number: n })
                 .then(function(data) { renderResult(data, n); });
         }
 
@@ -825,243 +805,31 @@ $WAITING_VISIBLE_LIMIT = 4;
                 doSearch();
             }
         });
-        form.addEventListener('submit', function(e) {
-            e.preventDefault();
-            clearTimeout(debounceTimer);
-            doSearch();
-        });
-
-        document.querySelectorAll('.awaiting-card').forEach(function(card) {
-            card.addEventListener('click', function() {
-                input.value = card.dataset.number;
-                doSearch();
-            });
-        });
     })();
-    </script>
 
-    <script>
-    // --- Ready for Claiming panel: inline AJAX add + claimed (same pattern ---
-    // --- as the Payment Confirmation panel above) — never a full page reload, ---
-    // --- so submitting a name can't reset the encoder's scroll position. ---
+    // --- Add / edit note (hidden until asked for) ---
     (function() {
-        const form = document.getElementById('addClaimForm');
-        const grid = document.getElementById('claimGrid');
-        const surnameInput = document.getElementById('claim_surname');
-        const initialsInput = document.getElementById('claim_initials');
-        const errorBox = document.getElementById('claimFormError');
-        const searchInput = document.getElementById('claimSearchInput');
-        const searchClearBtn = document.getElementById('claimSearchClear');
-        const searchResults = document.getElementById('claimSearchResults');
-        if (!form || !grid || !surnameInput || !initialsInput || !errorBox) return;
-
-        const currentEncoderName = <?= json_encode($encoder_name) ?>;
-        const currentStation = <?= (int) $interview_station ?>;
-
-        function escapeHtml(s) {
-            const d = document.createElement('div');
-            d.textContent = s == null ? '' : s;
-            return d.innerHTML;
-        }
-
-        function claimCardHtml(id, nameText) {
-            return '<div class="queue-card" data-claim-id="' + id + '">'
-                + '<span class="claim-name">' + escapeHtml(nameText) + '</span>'
-                + '<form class="card-form claim-claimed-form"><button type="submit" name="mark_claimed" class="btn btn-sm">Claimed</button></form>'
-                + '</div>';
-        }
-
-        function resetGridEmptyState() {
-            if (!grid.querySelector('[data-claim-id]')) {
-                grid.innerHTML = '<div class="empty-note">No results ready for claiming.</div>';
-            }
-        }
-
-        // Search stays on the page permanently and drives a small inline
-        // preview under the search bar — NOT the modal, and NOT a second data
-        // source. It reads live from #claimGrid (the same authoritative list
-        // the modal shows in full), so it's always in sync with adds/claims
-        // from either place. Empty query = no preview, matching "search
-        // shouldn't require opening the list first" without also turning the
-        // preview into a second full-list view.
-        function renderSearchResults() {
-            if (!searchInput || !searchClearBtn || !searchResults) return;
-            const query = searchInput.value.trim().toLowerCase();
-            searchClearBtn.style.display = query ? 'inline-flex' : 'none';
-
-            if (query === '') {
-                searchResults.style.display = 'none';
-                searchResults.innerHTML = '';
-                return;
-            }
-
-            const matches = [];
-            grid.querySelectorAll('[data-claim-id]').forEach(function(card) {
-                const nameEl = card.querySelector('.claim-name');
-                const text = nameEl ? nameEl.textContent : '';
-                if (text.toLowerCase().indexOf(query) !== -1) {
-                    matches.push({ id: card.dataset.claimId, text: text });
-                }
-            });
-
-            searchResults.style.display = '';
-            searchResults.innerHTML = matches.length
-                ? matches.map(function(m) { return claimCardHtml(m.id, m.text); }).join('')
-                : '<div class="empty-note">No matching name.</div>';
-        }
-
-        if (searchInput && searchClearBtn && searchResults) {
-            searchInput.addEventListener('input', renderSearchResults);
-            searchClearBtn.addEventListener('click', function() {
-                searchInput.value = '';
-                renderSearchResults();
-                searchInput.focus({ preventScroll: true });
-            });
-        }
-
-        // "Show Ready for Claiming List" — full, unfiltered browse view, same
-        // .modal-overlay/.modal-box pattern as the Waiting List and No Show
-        // modals above, independent of search (search no longer lives inside it).
-        const openListBtn = document.getElementById('openClaimListBtn');
-        const listModal = document.getElementById('claimListModal');
-        const closeListBtn = document.getElementById('closeClaimListModal');
-        if (openListBtn && listModal && closeListBtn) {
-            function openClaimListModal() {
-                listModal.style.display = 'flex';
-            }
-            function closeClaimListModal() {
-                listModal.style.display = 'none';
-            }
-            openListBtn.addEventListener('click', openClaimListModal);
-            closeListBtn.addEventListener('click', closeClaimListModal);
-            // Matches noShowModal's existing click-outside-closes pattern
-            // above (addEventListener, not the waiting-list modal's plain
-            // window.onclick=, so this can't silently overwrite/be overwritten
-            // by the other modals' own outside-click handlers).
-            window.addEventListener('click', function(e) {
-                if (e.target === listModal) closeClaimListModal();
-            });
-            // None of the existing modals close on Escape.
-            document.addEventListener('keydown', function(e) {
-                if (e.key === 'Escape' && listModal.style.display === 'flex') {
-                    closeClaimListModal();
-                }
-            });
-        }
-
-        function showError(msg) {
-            errorBox.textContent = msg;
-            errorBox.style.display = 'block';
-        }
-        function clearError() {
-            errorBox.style.display = 'none';
-            errorBox.textContent = '';
-        }
-
-        function addCard(id, surname, initials) {
-            const emptyNote = grid.querySelector('.empty-note');
-            if (emptyNote) emptyNote.remove();
-            grid.insertAdjacentHTML('beforeend', claimCardHtml(id, surname + ', ' + initials));
-        }
-
-        form.addEventListener('submit', function(e) {
-            e.preventDefault();
-            const surname = surnameInput.value.trim();
-            const initials = initialsInput.value.trim();
-            clearError();
-            if (surname === '') {
-                showError('Surname is required.');
-                surnameInput.focus({ preventScroll: true });
-                return;
-            }
-            if (initials === '') {
-                showError('First name initials are required.');
-                initialsInput.focus({ preventScroll: true });
-                return;
-            }
-            const btn = form.querySelector('button[type=submit]');
-            btn.disabled = true;
-            const body = new URLSearchParams();
-            body.set('add_claimable', '1');
-            body.set('encoder_name', currentEncoderName);
-            body.set('interview_station', currentStation);
-            body.set('surname', surname);
-            body.set('first_name_initials', initials);
-            fetch('', { method: 'POST', body: body, headers: { 'X-Requested-With': 'XMLHttpRequest' } })
-                .then(function(r) { return r.json(); })
-                .then(function(res) {
-                    btn.disabled = false;
-                    if (res.ok) {
-                        addCard(res.row.id, res.row.surname, res.row.first_name_initials);
-                        renderSearchResults();
-                        surnameInput.value = '';
-                        initialsInput.value = '';
-                        surnameInput.focus({ preventScroll: true });
-                    } else {
-                        showError(res.error || 'Could not add name.');
-                    }
-                })
-                .catch(function() {
-                    btn.disabled = false;
-                    showError('Network error — please try again.');
-                });
+        const toggle = document.getElementById('noteToggle');
+        const form = document.getElementById('noteForm');
+        if (!toggle || !form) return;
+        toggle.addEventListener('click', function() {
+            form.hidden = false;
+            const noteText = document.getElementById('noteText');
+            if (noteText) noteText.hidden = true;
+            toggle.hidden = true;
+            form.querySelector('input[name=notes]').focus();
         });
+    })();
 
-        function submitMarkClaimed(id, btn) {
-            btn.disabled = true;
-            const body = new URLSearchParams();
-            body.set('mark_claimed', '1');
-            body.set('id', id);
-            body.set('encoder_name', currentEncoderName);
-            return fetch('', { method: 'POST', body: body, headers: { 'X-Requested-With': 'XMLHttpRequest' } })
-                .then(function(r) { return r.json(); })
-                .catch(function() { return { ok: false }; })
-                .then(function(res) {
-                    if (!res.ok) btn.disabled = false;
-                    return res;
-                });
-        }
-
-        // Claiming from the modal's full list: remove the card there, then
-        // refresh the search preview in case it's showing that same name.
-        grid.addEventListener('submit', function(e) {
-            const claimForm = e.target.closest('.claim-claimed-form');
-            if (!claimForm) return;
-            e.preventDefault();
-            const card = claimForm.closest('[data-claim-id]');
-            const id = card ? card.dataset.claimId : null;
-            if (!id) return;
-            submitMarkClaimed(id, claimForm.querySelector('button[type=submit]')).then(function(res) {
-                if (res.ok) {
-                    card.remove();
-                    resetGridEmptyState();
-                    renderSearchResults();
-                }
-            });
-        });
-
-        // Claiming from the search preview: #claimGrid (the modal's list) is
-        // the authoritative source, so update it there first, then re-render
-        // the preview from that updated source rather than hand-editing both.
-        if (searchResults) {
-            searchResults.addEventListener('submit', function(e) {
-                const claimForm = e.target.closest('.claim-claimed-form');
-                if (!claimForm) return;
-                e.preventDefault();
-                const card = claimForm.closest('[data-claim-id]');
-                const id = card ? card.dataset.claimId : null;
-                if (!id) return;
-                submitMarkClaimed(id, claimForm.querySelector('button[type=submit]')).then(function(res) {
-                    if (res.ok) {
-                        const gridCard = grid.querySelector('[data-claim-id="' + id + '"]');
-                        if (gridCard) gridCard.remove();
-                        resetGridEmptyState();
-                        renderSearchResults();
-                    }
-                });
-            });
-        }
+    // Focus the most likely next action after every reload, so Enter and the
+    // keyboard letters work without a mouse click first.
+    (function() {
+        const target = document.querySelector('button[name=for_payment]')
+            || document.getElementById('issueTicketBtn')
+            || document.querySelector('button[name=call_next]:not([disabled])');
+        if (target) target.focus();
     })();
     </script>
+    <?php endif; ?>
 </body>
 </html>

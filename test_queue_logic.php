@@ -6,6 +6,8 @@
  * Uses a handful of scratch queue_numbers under today's service_date. Run
  * against a dev/empty database — if any of the scratch numbers below are
  * already in use for today, the script aborts before touching anything.
+ * The issue_next_number() tests (11-12) take max + 1 numbers instead, and
+ * clean those rows up by id.
  */
 
 require 'config.php';
@@ -57,7 +59,18 @@ if ($existing && $existing->num_rows > 0) {
     exit(1);
 }
 
-function cleanup($conn, $service_date, $yesterday, $scratch_numbers, $wrong_day_number, $test_started_at) {
+function cleanup($conn, $service_date, $yesterday, $scratch_numbers, $wrong_day_number, $test_started_at, $issued_ids, $issued_numbers) {
+    // Rows from issue_next_number() (Tests 11-12) get max + 1 numbers, not
+    // fixed scratch numbers, so they're removed by the ids collected as issued.
+    if (!empty($issued_ids)) {
+        $issued_id_ints = array_map('intval', $issued_ids);
+        $stmt = $conn->prepare("DELETE FROM queue WHERE id IN (" . placeholders(count($issued_id_ints)) . ")");
+        $stmt->bind_param(str_repeat('i', count($issued_id_ints)), ...$issued_id_ints);
+        $stmt->execute();
+        $stmt->close();
+    }
+    $scratch_numbers = array_merge($scratch_numbers, $issued_numbers);
+
     $scratch_ints = array_map('intval', $scratch_numbers);
     $stmt = $conn->prepare(
         "DELETE FROM queue WHERE service_date = ? AND queue_number IN (" . placeholders(count($scratch_ints)) . ")"
@@ -81,6 +94,9 @@ function cleanup($conn, $service_date, $yesterday, $scratch_numbers, $wrong_day_
     $stmt->execute();
     $stmt->close();
 }
+
+$issued_ids = [];     // rows created by issue_next_number(), for cleanup()
+$issued_numbers = [];
 
 try {
     // --- Test 1: add 5 tickets, interview them (1 -> payment, 2-5 -> no charge) ---
@@ -172,6 +188,8 @@ try {
 
     $reinstate_target = $remaining_scratch[0];
     check('mark_no_show on the reinstate target succeeds', mark_no_show($conn, $reinstate_target['id'], 'Tester'));
+    [, $no_show_confirmable, $no_show_reason] = find_for_payment($conn, (int) $reinstate_target['queue_number']);
+    check("find_for_payment on a no_show ticket reports 'no_show' (not 'no_charge')", $no_show_reason === 'no_show' && $no_show_confirmable === false);
     check('reinstate() on the no_show ticket succeeds', reinstate($conn, $reinstate_target['id'], 'Tester'));
 
     $extraction_queue_after_reinstate = get_extraction_queue($conn, $service_date);
@@ -266,8 +284,73 @@ try {
     $claimed_sorted = array_values($claimed_no_nulls);
     sort($claimed_sorted);
     check('the 10 claimed ids exactly match the 10 inserted rows (none skipped)', $claimed_sorted == array_map('strval', $expected_ids));
+
+    // --- Test 11: issue_next_number() (PRINT NEXT NUMBER) hands out max + 1, consecutively ---
+    // Runs last on purpose: it issues max + 1, so running it before Tests 1-10
+    // would take the scratch numbers those tests add by hand.
+    $expected_next = next_suggested_number($conn, $service_date);
+    $first = issue_next_number($conn, 'Tester', 1);
+    $second = issue_next_number($conn, 'Tester', 1);
+    foreach ([$first, $second] as $issued) {
+        if ($issued) {
+            $issued_ids[] = (int) $issued['id'];
+            $issued_numbers[] = (int) $issued['queue_number'];
+        }
+    }
+    check('issue_next_number() issues max + 1', $first && (int) $first['queue_number'] === $expected_next);
+    check('a second issue_next_number() issues the next consecutive number',
+        $first && $second && (int) $second['queue_number'] === (int) $first['queue_number'] + 1);
+    check("issued tickets start as 'waiting' for today's service_date",
+        $first && $second && $first['status'] === 'waiting' && $second['status'] === 'waiting'
+        && $first['service_date'] === $service_date);
+
+    $first_number = $first ? (int) $first['queue_number'] : 0;
+    $stmt = $conn->prepare(
+        "SELECT COUNT(*) AS cnt FROM lab_activity_log WHERE action = 'issue_ticket' AND queue_number = ? AND log_time >= ?"
+    );
+    $stmt->bind_param('is', $first_number, $test_started_at);
+    $stmt->execute();
+    $issue_log_count = (int) $stmt->get_result()->fetch_assoc()['cnt'];
+    $stmt->close();
+    check("issue_next_number() logs one 'issue_ticket' row", $issue_log_count === 1);
+
+    // --- Test 12: 10 concurrent issue_next_number() calls -> 10 distinct, consecutive numbers ---
+    // Same real-process race as Test 10: separate php.exe workers, each with its
+    // own connection, all launched before any is waited on. Every worker must
+    // get a number (the 1062 retry loop), no number twice (the unique key), and
+    // no gaps (max + 1 is recomputed on every retry).
+    $base_number = next_suggested_number($conn, $service_date);
+    $procs = [];
+    $pipes_by_worker = [];
+    for ($i = 0; $i < 10; $i++) {
+        $worker_code = "require '$config_path'; require '$qf_path'; "
+            . "\$r = issue_next_number(\$conn, 'IssueWorker', 0); echo \$r ? \$r['id'] . ':' . \$r['queue_number'] : 'NULL';";
+        $proc = proc_open([PHP_BINARY, '-r', $worker_code], $descriptorspec, $pipes);
+        $procs[$i] = $proc;
+        $pipes_by_worker[$i] = $pipes;
+    }
+
+    $concurrent_numbers = [];
+    for ($i = 0; $i < 10; $i++) {
+        $out = trim(stream_get_contents($pipes_by_worker[$i][1]));
+        $err = trim(stream_get_contents($pipes_by_worker[$i][2]));
+        fclose($pipes_by_worker[$i][1]);
+        fclose($pipes_by_worker[$i][2]);
+        proc_close($procs[$i]);
+        if ($err !== '') echo "  (issue worker $i stderr: $err)\n";
+        if (preg_match('/^(\d+):(\d+)$/', $out, $m)) {
+            $issued_ids[] = (int) $m[1];
+            $issued_numbers[] = (int) $m[2];
+            $concurrent_numbers[] = (int) $m[2];
+        }
+    }
+
+    check('all 10 concurrent issuers got a number (none returned null)', count($concurrent_numbers) === 10);
+    check('all 10 concurrently issued numbers are distinct', count(array_unique($concurrent_numbers)) === 10);
+    sort($concurrent_numbers);
+    check('the 10 concurrently issued numbers are consecutive (no gaps)', $concurrent_numbers === range($base_number, $base_number + 9));
 } finally {
-    cleanup($conn, $service_date, $yesterday, $ALL_SCRATCH_NUMBERS, $SCRATCH_WRONG_DAY_NUMBER, $test_started_at);
+    cleanup($conn, $service_date, $yesterday, $ALL_SCRATCH_NUMBERS, $SCRATCH_WRONG_DAY_NUMBER, $test_started_at, $issued_ids, $issued_numbers);
     echo "\n(scratch rows cleaned up)\n";
 }
 
